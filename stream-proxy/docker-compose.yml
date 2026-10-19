@@ -1,0 +1,21 @@
+services:
+  proxy:
+    build: .
+    image: douyu-stream-proxy:1.0.0
+    container_name: stream-proxy
+    restart: unless-stopped
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./pull_rate.conf:/tmp/pull_rate:ro
+    environment:
+      - MULTIVIEW=http://douyu-multiview:8900
+      - PULL_RATE=${PULL_RATE:-1}
+    networks:
+      - director_default
+      - multiview_default
+networks:
+  director_default:
+    external: true
+  multiview_default:
+    external: true
