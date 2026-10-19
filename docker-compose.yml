@@ -1,0 +1,97 @@
+# 斗鱼多房间同屏推流 - 一键部署
+# 用法:
+#   1. 复制本目录到目标设备
+#   2. cp grid-stream/config.env.example grid-stream/config.env,填入 RTMP 推流地址
+#   3. docker compose up -d --build
+#   4. 访问 http://设备IP:8901 (管理页)
+
+services:
+  # 本地 RTMP 服务器(推流目标为本地时用;推斗鱼时可注释掉本服务)
+  nginx-rtmp:
+    image: alfg/nginx-rtmp:latest
+    container_name: nginx-rtmp
+    restart: unless-stopped
+    ports:
+      - "1935:1935"
+    volumes:
+      - ./nginx-rtmp/nginx.conf:/etc/nginx/nginx.conf.template:ro
+    networks:
+      - streaming
+
+  # 流代理:拉斗鱼源,未开播房间填黑场
+  stream-proxy:
+    build: ./stream-proxy
+    container_name: stream-proxy
+    restart: unless-stopped
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./stream-proxy/pull_rate.conf:/tmp/pull_rate:ro
+      - ./stream-proxy/slots.json:/app/slots.json
+    environment:
+      - PULL_RATE=${PULL_RATE:-1}
+      - MULTIVIEW=http://douyu-multiview:8900
+    networks:
+      - streaming
+
+  # FFmpeg 网格混流推流
+  grid-stream:
+    image: jrottenberg/ffmpeg:5.1-ubuntu
+    container_name: grid-stream
+    restart: unless-stopped
+    entrypoint: ["/app/entry.sh"]
+    volumes:
+      - ./grid-stream/grid.sh:/app/grid.sh:ro
+      - ./grid-stream/entry.sh:/app/entry.sh:ro
+      - ./grid-stream/config.env:/app/config.env
+      - ./grid-stream/fonts:/app/fonts:ro
+      - ./grid-stream/images:/app/images:ro
+      - ./grid-stream/logs:/app/logs
+    environment:
+      - PROXY=http://stream-proxy:8888
+    networks:
+      - streaming
+    depends_on:
+      - stream-proxy
+    logging:
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # Web 管理页
+  stream-manager:
+    build: ./stream-manager
+    container_name: stream-manager
+    restart: unless-stopped
+    volumes:
+      - ./stream-manager/manager.js:/app/manager.js:ro
+      - ./grid-stream/config.env:/app/config.env
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./grid-stream/images:/app/images
+    environment:
+      - CONFIG_PATH=/app/config.env
+      - IMAGES_DIR=/app/images
+    ports:
+      - "8901:8901"
+    networks:
+      - streaming
+    depends_on:
+      - grid-stream
+      - stream-proxy
+
+  douyu-multiview:
+    build: ./douyu-multiview
+    container_name: douyu-multiview
+    restart: unless-stopped
+    ports:
+      - "8900:8900"
+    volumes:
+      - ./douyu-multiview/rooms.json:/app/rooms.json
+    environment:
+      - PORT=8900
+    networks:
+      - streaming
+
+networks:
+  streaming:
+    driver: bridge
