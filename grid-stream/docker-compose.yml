@@ -1,0 +1,26 @@
+services:
+  grid:
+    image: jrottenberg/ffmpeg:5.1-ubuntu
+    container_name: grid-stream
+    restart: unless-stopped
+    entrypoint: ["/app/entry.sh"]
+    volumes:
+      - ./grid.sh:/app/grid.sh:ro
+      - ./config.env:/app/config.env:ro
+      - ./black.mp4:/app/black.mp4:ro
+      - ./fonts:/app/fonts:ro
+      - ./images:/app/images:ro
+      - ./entry.sh:/app/entry.sh:ro
+      - ./logs:/app/logs
+    networks:
+      - director_default
+      - multiview_default
+    logging:
+      options:
+        max-size: "20m"
+        max-file: "3"
+networks:
+  director_default:
+    external: true
+  multiview_default:
+    external: true
