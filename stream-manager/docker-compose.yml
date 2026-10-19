@@ -1,0 +1,21 @@
+services:
+  manager:
+    build: .
+    image: douyu-stream-manager:1.0.0
+    container_name: stream-manager
+    restart: unless-stopped
+    volumes:
+      - ./manager.js:/app/manager.js:ro
+      - /volume2/docker/grid-stream/config.env:/volume2/docker/grid-stream/config.env
+      - /volume2/docker/grid-stream/images:/volume2/docker/grid-stream/images
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8901:8901"
+    networks:
+      - director_default
+      - multiview_default
+networks:
+  director_default:
+    external: true
+  multiview_default:
+    external: true
