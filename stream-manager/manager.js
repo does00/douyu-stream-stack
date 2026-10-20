@@ -149,6 +149,29 @@ async function containerStatus(name) {
   return { running: false };
 }
 
+// 2026-10-20: 解析 ffmpeg 最后报错，转成人话
+async function getFfmpegError() {
+  try{
+    const r = await sh('docker exec ' + GRID_CONTAINER + ' sh -c "tail -40 /app/logs/ffmpeg.log 2>/dev/null" | tr "\\r" "\\n" | grep -a -E "error|Error|failed|Failed|refused|denied|Invalid|expired" | grep -a -v "bitrate=" | tail -5', 5000);
+    const lines = String(r.stdout||'').trim().split('\n').filter(Boolean);
+    if(!lines.length) return '';
+    const last = lines[lines.length-1];
+    // wsTime 过期
+    let m = last.match(/wsTime=([0-9a-fA-F]+)/);
+    if(m){
+      const t = parseInt(m[1], 16) * 1000;
+      if(t < Date.now()) return '推流 key 已过期（wsTime），请更新推流地址';
+    }
+    if(/Input\/output error/i.test(last)) return '推流连接失败（I/O 错误），可能是 key 过期或网络问题';
+    if(/Connection refused/i.test(last)) return '推流服务器拒绝连接';
+    if(/Failed to resolve|Name or service not known/i.test(last)) return 'DNS 解析失败，检查网络';
+    if(/Conversion failed/i.test(last)) return 'ffmpeg 转码失败：' + last.slice(-80);
+    if(/No such file/i.test(last)) return '输入流不存在：' + last.slice(-80);
+    if(/Invalid data|Invalid argument/i.test(last)) return 'ffmpeg 参数/数据错误：' + last.slice(-80);
+    return 'ffmpeg 报错：' + last.slice(-100);
+  }catch(e){ return ''; }
+}
+
 function getJson(url) {
   return new Promise((resolve) => {
     const req = http.get(url, (res) => {
@@ -192,6 +215,7 @@ input{background:#0f172a;color:#eee;border:1px solid #334155;border-radius:6px;p
 <div class="card"><h2>推流状态</h2>
 <div class="status" id="st">...</div>
 <div class="meta" id="stMeta"></div>
+<div class="meta" id="stErr" style="display:none;color:#c00;margin-top:4px"></div>
 <div class="meta" id="healthMeta" style="margin-top:2px"></div><br>
 <button onclick="ctl('start')">启动</button>
 <button onclick="ctl('stop')">停止</button>
@@ -210,7 +234,7 @@ input{background:#0f172a;color:#eee;border:1px solid #334155;border-radius:6px;p
 <div class="meta">第一路为房间列表第一个</div>
 <div class="meta" style="margin-top:8px">图层列表 <span style="color:#666">(标题图片混排,越靠上越靠前,点「应用图层」约15秒生效,不用点「应用新布局」)</span><div id='layerList' style='margin-top:4px'></div><div style='margin-top:4px'><button onclick='addTitleRow()'>＋ 添加标题</button> <button onclick='document.getElementById("imgFileInput").click()'>＋ 添加图片</button><input type='file' id='imgFileInput' accept='.png,.jpg,.jpeg,.gif,.webp,.bmp' style='display:none' onchange='uploadImageFile(this)'> <button id='applyTitleBtn' onclick='applyLayersNow()' title='应用全部图层,约15秒生效'>应用标题</button></div></div>
 <div class="meta" style="margin-top:8px"><label><input type="checkbox" id="labelSw" onchange="toggleLabels(this.checked)" style="width:auto;vertical-align:middle"> 每路标签</label>
-  <label style="margin-left:12px"><input type="checkbox" id="giftSw" onchange="toggleGiftLabels(this.checked)" style="width:auto;vertical-align:middle"> 礼物总额</label><span style="color:#666;font-size:12px"> (每路一角显示今日礼物总额,60秒刷新)</span> 位置 <select id='labelPos' onchange='saveTextStyle()' style='background:#0f172a;color:#eee;border:1px solid #334155;border-radius:6px;padding:6px'><option value='bl'>左下</option><option value='br'>右下</option><option value='tl'>左上</option><option value='tr'>右上</option><option value='tc'>顶部居中</option><option value='bc'>底部居中</option></select> 字号 <input id='labelSize' type='number' min='10' max='72' placeholder='自动' style='width:56px' onchange='saveTextStyle()'>px 颜色 <input id='labelColor' type='color' value='#ffffff' onchange='saveTextStyle()' style='width:40px;padding:2px;vertical-align:middle'> <span style="color:#666">(改完点「应用新布局」重启生效)</span></div></select> <span style="font-size:12px;color:#888;margin-left:8px">当前生效: <b id="curLayout">-</b></span>
+  <label style="margin-left:12px"><input type="checkbox" id="giftSw" onchange="toggleGiftLabels(this.checked)" style="width:auto;vertical-align:middle"> 礼物总额</label><br><label style="font-size:12px;color:#888">礼物数据源地址 <input id="giftApiUrl" style="width:380px;background:#0f172a;color:#eee;border:1px solid #334155;border-radius:6px;padding:6px" placeholder="http://IP:18023/api/public/rooms"> <button onclick="saveGiftApiUrl()" style="padding:6px 12px">保存</button></label> <span style="font-size:12px;color:#666">(沙箱每60秒从此地址拉总额，?room=房间号自动拼接)</span><span style="color:#666;font-size:12px"> (每路一角显示今日礼物总额,60秒刷新)</span> 位置 <select id='labelPos' onchange='saveTextStyle()' style='background:#0f172a;color:#eee;border:1px solid #334155;border-radius:6px;padding:6px'><option value='bl'>左下</option><option value='br'>右下</option><option value='tl'>左上</option><option value='tr'>右上</option><option value='tc'>顶部居中</option><option value='bc'>底部居中</option></select> 字号 <input id='labelSize' type='number' min='10' max='72' placeholder='自动' style='width:56px' onchange='saveTextStyle()'>px 颜色 <input id='labelColor' type='color' value='#ffffff' onchange='saveTextStyle()' style='width:40px;padding:2px;vertical-align:middle'> <span style="color:#666">(改完点「应用新布局」重启生效)</span></div></select> <span style="font-size:12px;color:#888;margin-left:8px">当前生效: <b id="curLayout">-</b></span>
 <div style="display:flex;gap:16px;margin-top:12px">
 <div style="flex:1">
 <div style="font-size:12px;color:#888;margin-bottom:4px">新布局预览(待应用)</div>
@@ -272,7 +296,7 @@ function renderPreview(rooms, layout, targetId){
   if(!pv) return;
   const enabled = rooms.filter(r=>r.enabled);
   if(!enabled.length){ pv.innerHTML='<div style="color:#666;display:flex;align-items:center;justify-content:center">无启用房间</div>'; return; }
-  let cols=2, rows=2, focus=false, single=false, pip=false;
+  let cols=2, rows=2, focus=false, single=false, pip=false, autoCells=null;
   const n = enabled.length;
   if(layout==='single'||n===1){ single=true; }
   else if(layout==='focus'){ focus=true; }
@@ -280,23 +304,42 @@ function renderPreview(rooms, layout, targetId){
   else if(layout==='side'){ cols=2; rows=Math.ceil(n/2); }
   else if(layout==='stack'){ cols=Math.ceil(n/2); rows=2; }
   else if(layout==='grid'){ cols=2; rows=2; }
-  else { cols = n<=2?2 : n<=4?2 : 3; rows = Math.ceil(n/cols); }
-
-  pv.style.gridTemplateColumns = single ? '1fr' : focus ? '3fr 1fr' : pip ? '1fr' : 'repeat('+cols+',1fr)';
-  pv.style.gridTemplateRows = single ? '1fr' : focus ? '1fr' : pip ? '1fr' : 'repeat('+rows+',1fr)';
-  pv.style.position = pip ? 'relative' : '';
+  else {
+    // 2026-10-20:auto 与后端 grid.sh 一致 [x%,y%,w%,h%]
+    const A={
+      1:[[0,0,100,100]],
+      2:[[0,0,50,100],[50,0,50,100]],
+      3:[[0,0,50,50],[50,0,50,50],[0,50,100,50]],
+      4:[[0,0,50,50],[50,0,50,50],[0,50,50,50],[50,50,50,50]],
+      5:[[0,0,33.33,50],[33.33,0,33.33,50],[66.66,0,33.34,50],[0,50,50,50],[50,50,50,50]],
+      6:[[0,0,33.33,50],[33.33,0,33.33,50],[66.66,0,33.34,50],[0,50,33.33,50],[33.33,50,33.33,50],[66.66,50,33.34,50]],
+      7:[[0,0,33.33,33.33],[33.33,0,33.33,33.33],[66.66,0,33.34,33.33],[0,33.33,33.33,33.33],[33.33,33.33,33.33,33.33],[66.66,33.33,33.34,33.33],[0,66.66,100,33.34]],
+      8:[[0,0,33.33,33.33],[33.33,0,33.33,33.33],[66.66,0,33.34,33.33],[0,33.33,33.33,33.33],[33.33,33.33,33.33,33.33],[66.66,33.33,33.34,33.33],[0,66.66,50,33.34],[50,66.66,50,33.34]],
+      9:[[0,0,33.33,33.33],[33.33,0,33.33,33.33],[66.66,0,33.34,33.33],[0,33.33,33.33,33.33],[33.33,33.33,33.33,33.33],[66.66,33.33,33.34,33.33],[0,66.66,33.33,33.34],[33.33,66.66,33.33,33.34],[66.66,66.66,33.34,33.34]]
+    };
+    if(A[n]) autoCells=A[n]; else { cols=5; rows=2; }
+  }
+  pv.style.gridTemplateColumns = single?'1fr':focus?'3fr 1fr':(pip||autoCells)?'1fr':'repeat('+cols+',1fr)';
+  pv.style.gridTemplateRows = single?'1fr':focus?'1fr':(pip||autoCells)?'1fr':'repeat('+rows+',1fr)';
+  pv.style.position = (pip||autoCells)?'relative':'';
 
   let html='';
   if(single){
     const r=enabled[0];
     html+='<div draggable="true" data-rid="'+r.rid+'" style="background:#1e293b;display:flex;align-items:center;justify-content:center;border:2px solid #3b82f6">'+esc(r.name||r.rid)+'</div>';
   } else if(pip){
+    // 2026-10-20:右 1/4 宽条带，纵向平分
     const r0=enabled[0];
-    html+='<div draggable="true" data-rid="'+r0.rid+'" style="background:#1e293b;display:flex;align-items:center;justify-content:center;border:2px solid #3b82f6">'+esc(r0.name||r0.rid)+'<br>(主)</div>';
-    const pw=100/Math.min(4,Math.max(1,enabled.length-1));
+    html+='<div draggable="true" data-rid="'+r0.rid+'" style="position:absolute;left:0;top:0;width:100%;height:100%;background:#1e293b;display:flex;align-items:center;justify-content:center;border:2px solid #3b82f6">'+esc(r0.name||r0.rid)+'<br>(主)</div>';
+    const m=enabled.length-1, ph=100/m;
     for(let i=1;i<enabled.length;i++){
       const r=enabled[i];
-      html+='<div draggable="true" data-rid="'+r.rid+'" style="position:absolute;right:'+((enabled.length-1-i)*pw)+'%;bottom:0;width:'+pw+'%;height:25%;background:#16202e;display:flex;align-items:center;justify-content:center;font-size:11px;border:1px solid #334155">'+esc(r.name||r.rid)+'</div>';
+      html+='<div draggable="true" data-rid="'+r.rid+'" style="position:absolute;left:75%;top:'+((i-1)*ph)+'%;width:25%;height:'+ph+'%;background:#16202e;display:flex;align-items:center;justify-content:center;font-size:11px;border:1px solid #334155">'+esc(r.name||r.rid)+'</div>';
+    }
+  } else if(autoCells){
+    for(let i=0;i<enabled.length;i++){
+      const r=enabled[i], c=autoCells[i];
+      html+='<div draggable="true" data-rid="'+r.rid+'" style="position:absolute;left:'+c[0]+'%;top:'+c[1]+'%;width:'+c[2]+'%;height:'+c[3]+'%;background:#1e293b;display:flex;align-items:center;justify-content:center;border:1px solid #334155;box-sizing:border-box">'+esc(r.name||r.rid)+'</div>';
     }
   } else if(focus){
     const r0=enabled[0];
@@ -465,6 +508,7 @@ async function load(){
   try{ rooms=await api('/api/rooms'); }catch(e){ rooms=[]; }
   try{ slotData=await api('/api/slots'); }catch(e){ slotData=null; }
   if(s){ document.getElementById('st').innerHTML=s.pushing?'<span class="on">推流中</span>':'<span class="off">已停止</span>';
+    var _e=document.getElementById('stErr'); if(_e){ _e.textContent=s.lastError||''; _e.style.display=s.lastError?'':'none'; }
   var _m=s.pushing?("已推 "+s.uptime):""; if(s&&s.pushing&&s.bitrate){_m+=" | "+s.bitrate; if(s.speed)_m+=" "+s.speed;} document.getElementById("stMeta").textContent=_m; if(s&&s.pushing){ loadHealth(); } }
 async function loadHealth(){
   try{
@@ -515,6 +559,7 @@ async function loadHealth(){
   document.getElementById('curLayout').textContent={auto:'自动',grid:'田字格',focus:'焦点',single:'单路',side:'左右并排',stack:'上下并排',pip:'画中画'}[s.layout||'auto']||s.layout;
   try{const l=await api('/api/labels');document.getElementById('labelSw').checked=!!l.enabled;}catch(e){}
   try{const g=await api('/api/gift-labels');document.getElementById('giftSw').checked=!!g.enabled;}catch(e){}
+  loadGiftApiUrl();
   let _tt={text:''}, _pp={};
   try{const t=await api('/api/title');var _gti=document.getElementById('globalTitle');if(!_isTypingIn('globalTitle')){_gti.value=t.text||'';fitTitle(_gti);}document.getElementById('titleScroll').checked=!!t.scroll;if(!_isTypingIn('titleSpeed')) document.getElementById('titleSpeed').value=t.speed||120;_tt=t;}catch(e){}
   try{const p=await api('/api/textpos');
@@ -603,6 +648,8 @@ async function setVolume(rid,v){ await api('/api/rooms/volume','POST',{rid:Strin
 async function setLabel(rid,v){ await api('/api/rooms/label','POST',{rid:String(rid),label:v}); }
 async function toggleLabels(on){ await api('/api/labels','POST',{enabled:on}); }
 async function toggleGiftLabels(on){ await api('/api/gift-labels','POST',{enabled:on}); }
+async function loadGiftApiUrl(){ try{const g=await api('/api/gift-api-url');document.getElementById('giftApiUrl').value=g.url||'';}catch(e){} }
+async function saveGiftApiUrl(){ const u=document.getElementById('giftApiUrl').value.trim(); if(!u){alert('地址不能为空');return;} const r=await api('/api/gift-api-url','POST',{url:u}); if(r&&r.ok){alert('已保存');}else{alert('保存失败');} }
 async function setGlobalTitle(v){ await api('/api/title','POST',{text:v}); }
 async function saveTitleScroll(){ const s=document.getElementById('titleScroll').checked; const v=parseInt(document.getElementById('titleSpeed').value)||120; await api('/api/title','POST',{scroll:s,speed:v}); }
 function escapeHtml(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
@@ -969,6 +1016,16 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/gift-labels' && req.method === 'GET') {
     return send(200, { enabled: (getCfg().GIFT_LABELS || '1') === '1' });
   }
+  if (url.pathname === '/api/gift-api-url' && req.method === 'GET') {
+    return send(200, { url: getCfg().GIFT_API_URL || 'http://100.108.110.77:18023/api/public/rooms' });
+  }
+  if (url.pathname === '/api/gift-api-url' && req.method === 'POST') {
+    const b = await body();
+    const cfg = getCfg();
+    cfg.GIFT_API_URL = String(b.url || '').trim() || 'http://100.108.110.77:18023/api/public/rooms';
+    saveCfg(cfg);
+    return send(200, { ok: true, url: cfg.GIFT_API_URL });
+  }
   if (url.pathname === '/api/gift-labels' && req.method === 'POST') {
     const b = await body();
     const cfg = getCfg();
@@ -1299,7 +1356,15 @@ const server = http.createServer(async (req, res) => {
         if(bm) bitrate=bm[1]; if(sm) speed=sm[1];
       }catch(e){}
     }
-    return send(200, { pushing, uptime, rtmpUrl: getRtmpUrl(), layout: getLayout(), bitrate, speed });
+    let lastError='';
+    if(!pushing){
+      lastError = await getFfmpegError();
+    }else{
+      // 推流中也查一下是否有报错（比如 key 刚过期还在重试）
+      const e = await getFfmpegError();
+      if(e) lastError = e;
+    }
+    return send(200, { pushing, uptime, rtmpUrl: getRtmpUrl(), layout: getLayout(), bitrate, speed, lastError });
   }
 
   if (url.pathname === '/api/rooms') {
