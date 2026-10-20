@@ -78,16 +78,50 @@ async function syncFromMultiview(){
     while(curVol.length<cur.length) curVol.push('1.0');
     curVol = curVol.slice(0,cur.length);
     let changed=false;
+    const added=[];
+    const fetched=[];
     for(const rid of r){
       if(!/^[0-9]+$/.test(String(rid))) continue;
-      if(!cur.includes(rid)){
-        cur.push(rid); curEn.push('0'); curVol.push('1.0'); changed=true;
+      const s=String(rid);
+      if(!fetched.includes(s)) fetched.push(s);
+      if(!cur.includes(s)){
+        cur.push(s); curEn.push('0'); curVol.push('1.0'); changed=true; added.push(s);
+      }
+    }
+    // 2026-10-20:镜像同步——8900 已删的房间 8901 跟着删(旧版只加不减,僵尸房间越攒越多,以 8900 为准)
+    const removed=[];
+    for(let i=cur.length-1;i>=0;i--){
+      if(!fetched.includes(cur[i])){
+        removed.push(cur[i]);
+        cur.splice(i,1); curEn.splice(i,1); curVol.splice(i,1); changed=true;
       }
     }
     if(changed){
       cfg.ROOMS=cur.join(','); cfg.ENABLED=curEn.join(','); cfg.VOLUMES=curVol.join(',');
+      if(removed.length && cfg.LABELS){
+        cfg.LABELS=cfg.LABELS.split(';').filter(e=>{
+          if(!e) return false;
+          const eq=e.indexOf('=');
+          const k=(eq>0?e.slice(0,eq):e).trim();
+          return !removed.includes(k);
+        }).join(';');
+      }
       saveCfg(cfg);
-      console.log('从 8900 同步了新房间:', r.join(','));
+      if(added.length) console.log('从 8900 同步新增房间:', added.join(','));
+      if(removed.length) console.log('从 8900 同步删除房间:', removed.join(','));
+      // 被删房间占用的 slot 一并清空,避免野 slot 继续拉已删房间
+      for(const rid of removed){
+        try{
+          const sr = await proxyReq('GET','/api/slots');
+          const slots = (sr && sr.json && sr.json.slots) || {};
+          for(const k of Object.keys(slots)){
+            if(String(slots[k])===String(rid)){
+              const idx = parseInt(k.replace('slot',''),10);
+              if(!isNaN(idx)) await proxyReq('POST','/api/slots',{slot:idx, rid:null});
+            }
+          }
+        }catch(e){}
+      }
     }
   }catch(e){}
 }
@@ -1387,6 +1421,27 @@ const server = http.createServer(async (req, res) => {
       if (rooms.length >= 10) return send(400, { error: '最多10个' });
       rooms.push({ rid, enabled: false });
       await setConfig(rooms, getRtmpUrl());
+      // 2026-10-20:8901 加房间同步推给 8900,否则镜像同步会把它当 8900 没有的房间删掉
+      try {
+        const list = await new Promise((resolve) => {
+          const req = http.get(MULTIVIEW + '/api/rooms', { timeout: 5000 }, (res2) => {
+            let d = ''; res2.on('data', c => d += c);
+            res2.on('end', () => { try { resolve(JSON.parse(d)); } catch (e) { resolve(null); } });
+          });
+          req.on('error', () => resolve(null)); req.on('timeout', () => { req.destroy(); resolve(null); });
+        });
+        if (Array.isArray(list) && !list.map(String).includes(String(rid))) {
+          const payload = JSON.stringify({ rooms: [...list.map(String), String(rid)] });
+          await new Promise((resolve) => {
+            const u = new URL(MULTIVIEW + '/api/rooms');
+            const r2 = http.request({ hostname: u.hostname, port: u.port || 80, path: u.pathname,
+              method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+              timeout: 8000 }, (res2) => { res2.resume(); res2.on('end', () => resolve()); });
+            r2.on('error', () => resolve()); r2.on('timeout', () => { r2.destroy(); resolve(); });
+            r2.write(payload); r2.end();
+          });
+        }
+      } catch (e) {}
       return send(200, { ok: true });
     }
   }
