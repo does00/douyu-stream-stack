@@ -234,7 +234,7 @@ input{background:#0f172a;color:#eee;border:1px solid #334155;border-radius:6px;p
 <div class="meta">第一路为房间列表第一个</div>
 <div class="meta" style="margin-top:8px">图层列表 <span style="color:#666">(标题图片混排,越靠上越靠前,点「应用图层」约15秒生效,不用点「应用新布局」)</span><div id='layerList' style='margin-top:4px'></div><div style='margin-top:4px'><button onclick='addTitleRow()'>＋ 添加标题</button> <button onclick='document.getElementById("imgFileInput").click()'>＋ 添加图片</button><input type='file' id='imgFileInput' accept='.png,.jpg,.jpeg,.gif,.webp,.bmp' style='display:none' onchange='uploadImageFile(this)'> <button id='applyTitleBtn' onclick='applyLayersNow()' title='应用全部图层,约15秒生效'>应用标题</button></div></div>
 <div class="meta" style="margin-top:8px"><label><input type="checkbox" id="labelSw" onchange="toggleLabels(this.checked)" style="width:auto;vertical-align:middle"> 每路标签</label>
-  <label style="margin-left:12px"><input type="checkbox" id="giftSw" onchange="toggleGiftLabels(this.checked)" style="width:auto;vertical-align:middle"> 礼物总额</label><br><label style="font-size:12px;color:#888">礼物数据源地址 <input id="giftApiUrl" style="width:380px;background:#0f172a;color:#eee;border:1px solid #334155;border-radius:6px;padding:6px" placeholder="http://IP:18023/api/public/rooms"> <button onclick="saveGiftApiUrl()" style="padding:6px 12px">保存</button></label> <span style="font-size:12px;color:#666">(沙箱每60秒从此地址拉总额，?room=房间号自动拼接)</span><span style="color:#666;font-size:12px"> (每路一角显示今日礼物总额,60秒刷新)</span> 位置 <select id='labelPos' onchange='saveTextStyle()' style='background:#0f172a;color:#eee;border:1px solid #334155;border-radius:6px;padding:6px'><option value='bl'>左下</option><option value='br'>右下</option><option value='tl'>左上</option><option value='tr'>右上</option><option value='tc'>顶部居中</option><option value='bc'>底部居中</option></select> 字号 <input id='labelSize' type='number' min='10' max='72' placeholder='自动' style='width:56px' onchange='saveTextStyle()'>px 颜色 <input id='labelColor' type='color' value='#ffffff' onchange='saveTextStyle()' style='width:40px;padding:2px;vertical-align:middle'> <span style="color:#666">(改完点「应用新布局」重启生效)</span></div></select> <span style="font-size:12px;color:#888;margin-left:8px">当前生效: <b id="curLayout">-</b></span>
+  <label style="margin-left:12px"><input type="checkbox" id="giftSw" onchange="toggleGiftLabels(this.checked)" style="width:auto;vertical-align:middle"> 礼物总额</label><br><label style="font-size:12px;color:#888">礼物数据源地址 <input id="giftApiUrl" style="width:380px;background:#0f172a;color:#eee;border:1px solid #334155;border-radius:6px;padding:6px" placeholder="例:http://192.168.1.24:18023/api/public/rooms，留空=禁用"> <button onclick="saveGiftApiUrl()" style="padding:6px 12px">保存</button></label> <span style="font-size:12px;color:#666">(沙箱每60秒从此地址拉总额，?room=房间号自动拼接)</span><span style="color:#666;font-size:12px"> (每路一角显示今日礼物总额,60秒刷新)</span> 位置 <select id='labelPos' onchange='saveTextStyle()' style='background:#0f172a;color:#eee;border:1px solid #334155;border-radius:6px;padding:6px'><option value='bl'>左下</option><option value='br'>右下</option><option value='tl'>左上</option><option value='tr'>右上</option><option value='tc'>顶部居中</option><option value='bc'>底部居中</option></select> 字号 <input id='labelSize' type='number' min='10' max='72' placeholder='自动' style='width:56px' onchange='saveTextStyle()'>px 颜色 <input id='labelColor' type='color' value='#ffffff' onchange='saveTextStyle()' style='width:40px;padding:2px;vertical-align:middle'> <span style="color:#666">(改完点「应用新布局」重启生效)</span></div></select> <span style="font-size:12px;color:#888;margin-left:8px">当前生效: <b id="curLayout">-</b></span>
 <div style="display:flex;gap:16px;margin-top:12px">
 <div style="flex:1">
 <div style="font-size:12px;color:#888;margin-bottom:4px">新布局预览(待应用)</div>
@@ -1017,12 +1017,12 @@ const server = http.createServer(async (req, res) => {
     return send(200, { enabled: (getCfg().GIFT_LABELS || '1') === '1' });
   }
   if (url.pathname === '/api/gift-api-url' && req.method === 'GET') {
-    return send(200, { url: getCfg().GIFT_API_URL || 'http://100.108.110.77:18023/api/public/rooms' });
+    return send(200, { url: getCfg().GIFT_API_URL || '' });
   }
   if (url.pathname === '/api/gift-api-url' && req.method === 'POST') {
     const b = await body();
     const cfg = getCfg();
-    cfg.GIFT_API_URL = String(b.url || '').trim() || 'http://100.108.110.77:18023/api/public/rooms';
+    cfg.GIFT_API_URL = String(b.url || '').trim();
     saveCfg(cfg);
     return send(200, { ok: true, url: cfg.GIFT_API_URL });
   }
