@@ -5,6 +5,10 @@ trap 'pkill -x ffmpeg 2>/dev/null; exit 0' TERM INT
 if ! command -v curl > /dev/null 2>&1; then
   apt-get update -qq 2>/dev/null && apt-get install -y -qq curl 2>/dev/null > /dev/null
 fi
+# 礼物总额本地拉取(2026-10-20):未配置 GIFT_API_URL 时脚本自行退出,无副作用
+if [ -f /app/fetch_gifts.sh ]; then
+  ( bash /app/fetch_gifts.sh >> /app/logs/gift_fetch.log 2>&1 ) &
+fi
 # 看门狗:ffmpeg 进程活着但输出停滞,视为卡死,杀掉由外层拉起
 # 2026-10-18 教训:不要用 speed<0.9 判断——切换房间时速度短暂下跌属正常,误杀致断流
 # 2026-10-19 教训:不要用"日志 mtime"判断——ffmpeg 即使 filter 饿死也会定时打印
