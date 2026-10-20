@@ -43,6 +43,7 @@ services:
     volumes:
       - ./grid-stream/grid.sh:/app/grid.sh:ro
       - ./grid-stream/entry.sh:/app/entry.sh:ro
+      - ./grid-stream/fetch_gifts.sh:/app/fetch_gifts.sh:ro
       - ./grid-stream/config.env:/app/config.env
       - ./grid-stream/fonts:/app/fonts:ro
       - ./grid-stream/images:/app/images:ro
