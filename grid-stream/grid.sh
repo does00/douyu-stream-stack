@@ -13,6 +13,7 @@ LAYOUT="${LAYOUT:-auto}"
 # 位置:LABEL_POS 每路标签位置,TITLE_POS 全局标题位置;可选 tl左上 tr右上 bl左下 br右下 tc顶部居中 bc底部居中
 # 字号:LABEL_SIZE/TITLE_SIZE 为空=自动(按格高/画面高自适应);颜色:LABEL_COLOR/TITLE_COLOR #rrggbb
 TEXT_LABELS="${TEXT_LABELS:-1}"
+GIFT_LABELS="${GIFT_LABELS:-1}"
 LABEL_POS="${LABEL_POS:-bl}"
 TITLE_POS="${TITLE_POS:-tc}"
 TITLE_X="${TITLE_X:-0.5}"
@@ -167,25 +168,36 @@ NIMG=${#IMG_V[@]}
 write_label_files() {
   mkdir -p /tmp/labels
   [ -f /tmp/gift_totals.sh ] && source /tmp/gift_totals.sh
-  local _gen=1 _gr
-  _gr=$(curl -s -m 5 http://stream-manager:8901/api/gift-labels 2>/dev/null)
-  case "$_gr" in *'"enabled":false'*) _gen=0;; esac
-  local i rid lb _gtv
+  # 2026-10-20:标签与礼物总额独立开关
+  local _len=1 _gen=1 _r
+  _r=$(curl -s -m 5 http://stream-manager:8901/api/labels 2>/dev/null)
+  case "$_r" in *'"enabled":false'*) _len=0;; esac
+  _r=$(curl -s -m 5 http://stream-manager:8901/api/gift-labels 2>/dev/null)
+  case "$_r" in *'"enabled":false'*) _gen=0;; esac
+  local i rid lb _gtv _gt
   for ((i=0;i<N;i++)); do
     rid="${SLOT_RIDS[$i]}"
-    lb="${LABEL_MAP[$rid]:-}"
-    [ -z "$lb" ] && lb="${NAMES[$i]}"
-    [ -z "$lb" ] && lb="$rid"
+    lb=""
+    if [ "$_len" = "1" ]; then
+      lb="${LABEL_MAP[$rid]:-}"
+      [ -z "$lb" ] && lb="${NAMES[$i]}"
+      [ -z "$lb" ] && lb="$rid"
+    fi
     _gtv="GIFT_TOTAL_$rid"
-    if [ "$_gen" = "1" ] && [ -n "${!_gtv:-}" ]; then lb="$lb"$'\n'"今日 ¥${!_gtv}"; fi
-    printf '%s' "$lb" > "/tmp/labels/label_$i.txt"
+    _gt="${!_gtv:-}"
+    if [ "$_gen" = "1" ] && [ -n "$_gt" ]; then
+      _gt="今日 ¥$_gt"
+      if [ -n "$lb" ]; then lb="$lb"$'\n'"$_gt"; else lb="$_gt"; fi
+    fi
+    printf "%s" "$lb" > "/tmp/labels/label_$i.txt"
   done
 }
-if [ "$TEXT_LABELS" = "1" ] && [ -f "$FONT" ]; then
+# 2026-10-20:标签与礼物总额独立开关，任一开覆盖层就跑
+if { [ "$TEXT_LABELS" = "1" ] || [ "$GIFT_LABELS" = "1" ]; } && [ -f "$FONT" ]; then
   LABELS_ON=1
 else
   LABELS_ON=0
-  [ "$TEXT_LABELS" = "1" ] && echo "[grid] 字体缺失,跳过文字标签" >&2
+  { [ "$TEXT_LABELS" = "1" ] || [ "$GIFT_LABELS" = "1" ]; } && echo "[grid] 字体缺失,跳过文字标签" >&2
 fi
 
 # 每路音量: FVOLS 与 RIDS 对齐(过滤后),默认 1.0
@@ -240,7 +252,8 @@ build_filter() {
   elif [ "$mode" = "focus" ]; then
     # 2026-10-19:格子必须无缝铺满整幅画布,否则 xstack 未覆盖区域显示绿块(ffmpeg 5.1 无 fillcolor)
     # 左列主画面占 3/4 宽 x 全高;右列小窗纵向无缝铺满(各自 pad 黑边,无间隙无边距)
-    local main_w=$((W*3/4)) col_w=$((W-main_w))
+    local main_w=$((W*3/4))
+    local col_w=$((W-main_w))
     vf="[0:v]scale=${main_w}:${H}:force_original_aspect_ratio=decrease,pad=${main_w}:${H}:(ow-iw)/2:(oh-ih)/2$(dt_filter 0 $H)[v0]"
     local nsmall=$((n-1)) layout="" y=0
     for ((i=1;i<n;i++)); do
@@ -319,68 +332,61 @@ build_filter() {
     for ((i=0;i<n;i++)); do vf="$vf[v$i]"; done
     vf="${vf}xstack=inputs=$n:layout=${pos:1},scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2[v]"
   elif [ "$mode" = "pip" ]; then
-    # 2026-10-19:画中画——第 0 路全屏为底,小窗全部排进右下 1/4 象限(密集表,无缝无绿块)
-    # 注意:小窗与全屏底在 xstack 里重叠,各路 SAR 必须一致(setsar=1),
-    # 否则 scale 的 force_original_aspect_ratio 会产生分数 SAR(如 640/639),触发 xstack 重配失败
-    vf="[0:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,setsar=1,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2$(dt_filter 0 $H)[v0]"
-    local m=$((n-1)) mc=2 mr=2
-    if [ "$m" -eq 1 ]; then mc=1; mr=1
-    elif [ "$m" -eq 2 ]; then mc=2; mr=1
-    elif [ "$m" -eq 3 ]; then mc=3; mr=1
-    elif [ "$m" -eq 4 ]; then mc=2; mr=2
-    elif [ "$m" -eq 5 ]; then mc=5; mr=1
-    elif [ "$m" -eq 6 ]; then mc=3; mr=2
-    elif [ "$m" -eq 7 ]; then mc=7; mr=1
-    elif [ "$m" -eq 8 ]; then mc=4; mr=2
-    elif [ "$m" -eq 9 ]; then mc=3; mr=3
-    else mc=5; mr=2; fi
-    local ox=$((W/2)) oy=$((H/2))
-    local qw=$(((W-ox)/mc)) qh=$(((H-oy)/mr))
-    local pos=""
+    # 2026-10-20:画中画——第 0 路全屏为底，其余占右 1/4 宽×全高、纵向平分
+    # 注意：xstack 不支持重叠输入（后输入盖不上），必须用 overlay 链
+    # 各路 SAR 必须一致(setsar=1)，否则 scale 的 force_original_aspect_ratio 会产生分数 SAR 触发重配失败
+    vf="[0:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,setsar=1,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2$(dt_filter 0 $H)[base]"
+    local m=$((n-1))
+    local sx=$((W-W/4)) sw=$((W/4))
+    local prev="base"
     for ((i=1;i<n;i++)); do
-      # 注意:同一条 local 里后声明的变量看不到先声明的(实测 col 会用上轮的 j),必须分开写
       local j=$((i-1))
-      local col=$((j%mc)) row=$((j/mc))
-      local ww=$qw hh=$qh
-      if [ "$col" -eq "$((mc-1))" ]; then ww=$((W-ox-col*qw)); fi
-      if [ "$row" -eq "$((mr-1))" ]; then hh=$((H-oy-row*qh)); fi
-      local x=$((ox+col*qw)) y=$((oy+row*qh))
-      vf="$vf;[$i:v]scale=$ww:$hh:force_original_aspect_ratio=decrease,setsar=1,pad=$ww:$hh:(ow-iw)/2:(oh-ih)/2$(dt_filter $i $hh)[v$i]"
-      pos="$pos|${x}_${y}"
+      local ch=$((H/m))
+      local y=$((j*ch))
+      if [ "$i" -eq "$((n-1))" ]; then ch=$((H-y)); fi  # 最后一个吃掉余数
+      vf="$vf;[$i:v]scale=${sw}:${ch}:force_original_aspect_ratio=decrease,setsar=1,pad=${sw}:${ch}:(ow-iw)/2:(oh-ih)/2$(dt_filter $i $ch)[p$i]"
+      if [ "$i" -eq "$((n-1))" ]; then
+        vf="$vf;[$prev][p$i]overlay=${sx}:${y}[v]"
+      else
+        vf="$vf;[$prev][p$i]overlay=${sx}:${y}[t$i]"
+        prev="t$i"
+      fi
     done
-    vf="$vf;[v0]"
-    for ((i=1;i<n;i++)); do vf="$vf[v$i]"; done
-    # 注意:xstack 输出已是精确 W×H(v0 全屏打底),此处不能再跟 scale(反向协商会冲掉小窗尺寸导致 pad 重配失败)
-    vf="${vf}xstack=inputs=$n:layout=0_0${pos}[v]"
   else
-    local cols=2 rows=2
-    # 2026-10-18:布局必须无空格子,否则 xstack 空单元显示绿块(ffmpeg 5.1 无 fillcolor)
-    if [ "$n" -eq 1 ]; then cols=1; rows=1
-    elif [ "$n" -eq 2 ]; then cols=2; rows=1
-    elif [ "$n" -eq 3 ]; then cols=3; rows=1
-    elif [ "$n" -eq 4 ]; then cols=2; rows=2
-    elif [ "$n" -eq 5 ]; then cols=5; rows=1
-    elif [ "$n" -eq 6 ]; then cols=3; rows=2
-    elif [ "$n" -eq 7 ]; then cols=7; rows=1
-    elif [ "$n" -eq 8 ]; then cols=4; rows=2
-    elif [ "$n" -eq 9 ]; then cols=3; rows=3
-    elif [ "$n" -eq 10 ]; then cols=5; rows=2
-    else cols=4; rows=3; fi
-    local cw=$((W/cols)) ch=$((H/rows))
-    local pos=""
+    # 2026-10-20: auto 布局 1-9 逐种设计，无空格子无单行挤压（已验证铺满画布）
+    # 1:全屏 2:左右 3:上二下一 4:2x2 5:上三下二 6:3x2 7:上三中三下一 8:上三中三下二 9:3x3
+    local w2=$((W/2)) rw2=$((W-W/2)) w3=$((W/3)) rw3=$((W-2*(W/3))) w3x2=$((2*(W/3)))
+    local h2=$((H/2)) rh2=$((H-H/2)) h3=$((H/3)) rh3=$((H-2*(H/3))) h3x2=$((2*(H/3)))
+    local -a ax ay aw ah
+    case $n in
+      1) ax=(0); ay=(0); aw=($W); ah=($H) ;;
+      2) ax=(0 $w2); ay=(0 0); aw=($w2 $rw2); ah=($H $H) ;;
+      3) ax=(0 $w2 0); ay=(0 0 $h2); aw=($w2 $rw2 $W); ah=($h2 $h2 $rh2) ;;
+      4) ax=(0 $w2 0 $w2); ay=(0 0 $h2 $h2); aw=($w2 $rw2 $w2 $rw2); ah=($h2 $h2 $rh2 $rh2) ;;
+      5) ax=(0 $w3 $w3x2 0 $w2); ay=(0 0 0 $h2 $h2); aw=($w3 $w3 $rw3 $w2 $rw2); ah=($h2 $h2 $h2 $rh2 $rh2) ;;
+      6) ax=(0 $w3 $w3x2 0 $w3 $w3x2); ay=(0 0 0 $h2 $h2 $h2); aw=($w3 $w3 $rw3 $w3 $w3 $rw3); ah=($h2 $h2 $h2 $rh2 $rh2 $rh2) ;;
+      7) ax=(0 $w3 $w3x2 0 $w3 $w3x2 0); ay=(0 0 0 $h3 $h3 $h3 $h3x2); aw=($w3 $w3 $rw3 $w3 $w3 $rw3 $W); ah=($h3 $h3 $h3 $h3 $h3 $h3 $rh3) ;;
+      8) ax=(0 $w3 $w3x2 0 $w3 $w3x2 0 $w2); ay=(0 0 0 $h3 $h3 $h3 $h3x2 $h3x2); aw=($w3 $w3 $rw3 $w3 $w3 $rw3 $w2 $rw2); ah=($h3 $h3 $h3 $h3 $h3 $h3 $rh3 $rh3) ;;
+      9) ax=(0 $w3 $w3x2 0 $w3 $w3x2 0 $w3 $w3x2); ay=(0 0 0 $h3 $h3 $h3 $h3x2 $h3x2 $h3x2); aw=($w3 $w3 $rw3 $w3 $w3 $rw3 $w3 $w3 $rw3); ah=($h3 $h3 $h3 $h3 $h3 $h3 $rh3 $rh3 $rh3) ;;
+      *) local cols=5 rows=2; local i
+         for ((i=0;i<n;i++)); do
+           local col=$((i%cols)) row=$((i/cols))
+           ax+=($((col*W/cols))); ay+=($((row*H/rows))); aw+=($((W/cols))); ah+=($((H/rows)))
+         done ;;
+    esac
+    local vf="" pos="" i
     for ((i=0;i<n;i++)); do
-      local col=$((i%cols)) row=$((i/cols))
-      # 2026-10-19:末列/末行吃掉取整余数,杜绝右/下边缘绿边(如 1280/3 取整漏 2px)
-      local ww=$cw hh=$ch
-      if [ "$col" -eq "$((cols-1))" ]; then ww=$((W-col*cw)); fi
-      if [ "$row" -eq "$((rows-1))" ]; then hh=$((H-row*ch)); fi
-      local x=$((col*cw)) y=$((row*ch))
-      vf="$vf;[$i:v]scale=$ww:$hh:force_original_aspect_ratio=decrease,pad=$ww:$hh:(ow-iw)/2:(oh-ih)/2$(dt_filter $i $hh)[v$i]"
-      pos="$pos|${x}_${y}"
+      vf="$vf;[$i:v]scale=${aw[$i]}:${ah[$i]}:force_original_aspect_ratio=decrease,pad=${aw[$i]}:${ah[$i]}:(ow-iw)/2:(oh-ih)/2$(dt_filter $i ${ah[$i]})[v$i]"
+      pos="$pos|${ax[$i]}_${ay[$i]}"
     done
-    vf="${vf:1};"
-    for ((i=0;i<n;i++)); do vf="$vf[v$i]"; done
-    vf="${vf}xstack=inputs=$n:layout=${pos:1},scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2[v]"
+    if [ "$n" -eq 1 ]; then
+      vf="[0:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2$(dt_filter 0 $H)[v]"
+    else
+      vf="${vf:1};"
+      for ((i=0;i<n;i++)); do vf="$vf[v$i]"; done
+      vf="${vf}xstack=inputs=$n:layout=${pos:1}[v]"
+    fi
+
   fi
   echo "$vf"
 }
