@@ -1,0 +1,104 @@
+# 斗鱼多房间同屏推流 - 开箱即用版(无需下载代码)
+# 用法(目标机只需装 Docker,无需 clone 本仓库):
+#   docker compose -f https://raw.githubusercontent.com/does00/douyu-stream-stack/main/docker-compose.ghcr.yml up -d
+#   然后打开 http://设备IP:8901,在管理页填推流目标 RTMP 地址与房间,点重启推流生效。
+# 注意:
+#   - 首次使用前,需把 GHCR 上 4 个镜像包设为公开(见 README 开箱即用一节),否则拉镜像要登录。
+#   - 配置/图片/日志/房间/slot 都存在命名 volume 里,容器重建不丢;图片图层可用
+#     docker cp xxx.jpg stream-manager:/app/images/ 放入,或直接在管理页叠加已有图片。
+#   - 本地开发/改代码仍用根目录 docker-compose.yml + --build,不要改本文件。
+#   - stream-manager 需挂 docker.sock 才能重启 grid-stream 容器,这是本机部署的常规做法。
+
+services:
+  # 本地 RTMP 服务器(推流目标为本地时用;推斗鱼时可注释掉本服务)
+  nginx-rtmp:
+    image: alfg/nginx-rtmp:latest
+    container_name: nginx-rtmp
+    restart: unless-stopped
+    ports:
+      - "1935:1935"
+    networks:
+      - streaming
+
+  # 流代理:拉斗鱼源,未开播房间填黑场
+  stream-proxy:
+    image: ghcr.io/does00/douyu-stream-stack-stream-proxy:latest
+    container_name: stream-proxy
+    restart: unless-stopped
+    ports:
+      - "8888:8888"
+    volumes:
+      - stream-slots:/app/slotsdata
+    environment:
+      - PULL_RATE=${PULL_RATE:-1}
+      - MULTIVIEW=http://douyu-multiview:8900
+      - SLOTS_FILE=/app/slotsdata/slots.json
+    networks:
+      - streaming
+
+  # FFmpeg 网格混流推流(脚本与字体已打进镜像)
+  grid-stream:
+    image: ghcr.io/does00/douyu-stream-stack-grid-stream:latest
+    container_name: grid-stream
+    restart: unless-stopped
+    volumes:
+      - stream-config:/app/cfg
+      - stream-images:/app/images
+      - stream-logs:/app/logs
+    environment:
+      - PROXY=http://stream-proxy:8888
+      - GRID_CONFIG=/app/cfg/config.env
+    networks:
+      - streaming
+    depends_on:
+      - stream-proxy
+    logging:
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # Web 管理页
+  stream-manager:
+    image: ghcr.io/does00/douyu-stream-stack-stream-manager:latest
+    container_name: stream-manager
+    restart: unless-stopped
+    volumes:
+      - stream-config:/app/cfg
+      - stream-images:/app/images
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - CONFIG_PATH=/app/cfg/config.env
+      - IMAGES_DIR=/app/images
+    ports:
+      - "8901:8901"
+    networks:
+      - streaming
+    depends_on:
+      - grid-stream
+      - stream-proxy
+
+  douyu-multiview:
+    image: ghcr.io/does00/douyu-stream-stack-douyu-multiview:latest
+    container_name: douyu-multiview
+    restart: unless-stopped
+    ports:
+      - "8900:8900"
+    volumes:
+      - stream-rooms:/app/roomsdata
+    environment:
+      - PORT=8900
+      - HOST=0.0.0.0
+      - ROOMS_FILE=/app/roomsdata/rooms.json
+    networks:
+      - streaming
+
+networks:
+  streaming:
+    driver: bridge
+
+volumes:
+  stream-config:
+  stream-images:
+  stream-logs:
+  stream-slots:
+  stream-rooms:

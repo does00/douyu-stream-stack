@@ -43,6 +43,22 @@ docker compose up -d --build
 中文字体已内置（`grid-stream/fonts/`），画面标签开箱即用。
 图片图层：把 JPG/PNG 放到 `grid-stream/images/`，管理页可叠加（见管理页说明）。
 
+## 开箱即用（无需下载代码）
+
+镜像由 GitHub Actions 在每次推 main 后自动构建并发布到 GHCR，目标机只需装 Docker：
+
+```
+docker compose -f https://raw.githubusercontent.com/does00/douyu-stream-stack/main/docker-compose.ghcr.yml up -d
+```
+
+然后打开 `http://设备IP:8901`，在管理页填推流目标 RTMP 地址与房间，点重启推流生效。配置、图片、日志、房间、slot 都存在命名 volume 里，容器重建不丢。
+
+注意：
+
+- GHCR 新包首次发布默认为私有，仓库主人需到各包设置页（Package settings → Danger Zone → Change visibility）改为公开，上面的一键命令才无需登录可用。
+- 图片图层可用 `docker cp xxx.jpg stream-manager:/app/images/` 放入，或在管理页叠加已有图片。
+- 本地开发、改代码仍用根目录 `docker-compose.yml` + `docker compose up -d --build`，不要改 `docker-compose.ghcr.yml`。
+
 ## 常用命令
 
 ```bash

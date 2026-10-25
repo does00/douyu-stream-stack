@@ -1,7 +1,7 @@
 #!/bin/bash
 # 多路斗鱼同屏推流:代理 -> ffmpeg 网格 -> RTMP
 # 配置从 /app/config.env 读取(管理页修改)
-CONFIG="/app/config.env"
+CONFIG="${GRID_CONFIG:-/app/config.env}"
 if [ -f "$CONFIG" ]; then source "$CONFIG"; fi
 
 PROXY="${PROXY:-http://stream-proxy:8888}"
