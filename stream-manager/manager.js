@@ -190,13 +190,8 @@ async function getFfmpegError() {
     const lines = String(r.stdout||'').trim().split('\n').filter(Boolean);
     if(!lines.length) return '';
     const last = lines[lines.length-1];
-    // wsTime 过期
-    let m = last.match(/wsTime=([0-9a-fA-F]+)/);
-    if(m){
-      const t = parseInt(m[1], 16) * 1000;
-      if(t < Date.now()) return '推流 key 已过期（wsTime），请更新推流地址';
-    }
-    if(/Input\/output error/i.test(last)) return '推流连接失败（I/O 错误），可能是 key 过期或网络问题';
+    // 2026-10-24: wsTime 是 key 的签发时刻、不是到期时间（实测签发 1 小时后仍可重推），不再据此报 key 过期
+    if(/Input\/output error/i.test(last)) return '推流连接失败（I/O 错误），连接已被断开（平台断流/网络问题均可能，看门狗会自动重推）';
     if(/Connection refused/i.test(last)) return '推流服务器拒绝连接';
     if(/Failed to resolve|Name or service not known/i.test(last)) return 'DNS 解析失败，检查网络';
     if(/Conversion failed/i.test(last)) return 'ffmpeg 转码失败：' + last.slice(-80);
@@ -268,7 +263,7 @@ input{background:#0f172a;color:#eee;border:1px solid #334155;border-radius:6px;p
 <div class="meta">第一路为房间列表第一个</div>
 <div class="meta" style="margin-top:8px">图层列表 <span style="color:#666">(标题图片混排,越靠上越靠前,点「应用图层」约15秒生效,不用点「应用新布局」)</span><div id='layerList' style='margin-top:4px'></div><div style='margin-top:4px'><button onclick='addTitleRow()'>＋ 添加标题</button> <button onclick='document.getElementById("imgFileInput").click()'>＋ 添加图片</button><input type='file' id='imgFileInput' accept='.png,.jpg,.jpeg,.gif,.webp,.bmp' style='display:none' onchange='uploadImageFile(this)'> <button id='applyTitleBtn' onclick='applyLayersNow()' title='应用全部图层,约15秒生效'>应用标题</button></div></div>
 <div class="meta" style="margin-top:8px"><label><input type="checkbox" id="labelSw" onchange="toggleLabels(this.checked)" style="width:auto;vertical-align:middle"> 每路标签</label>
-  <label style="margin-left:12px"><input type="checkbox" id="giftSw" onchange="toggleGiftLabels(this.checked)" style="width:auto;vertical-align:middle"> 礼物总额</label><br><label style="font-size:12px;color:#888">礼物数据源地址 <input id="giftApiUrl" style="width:380px;background:#0f172a;color:#eee;border:1px solid #334155;border-radius:6px;padding:6px" placeholder="例:http://192.168.1.24:18023/api/public/rooms，留空=禁用"> <button onclick="saveGiftApiUrl()" style="padding:6px 12px">保存</button></label> <span style="font-size:12px;color:#666">(沙箱每60秒从此地址拉总额，?room=房间号自动拼接)</span><span style="color:#666;font-size:12px"> (每路一角显示今日礼物总额,60秒刷新)</span> 位置 <select id='labelPos' onchange='saveTextStyle()' style='background:#0f172a;color:#eee;border:1px solid #334155;border-radius:6px;padding:6px'><option value='bl'>左下</option><option value='br'>右下</option><option value='tl'>左上</option><option value='tr'>右上</option><option value='tc'>顶部居中</option><option value='bc'>底部居中</option></select> 字号 <input id='labelSize' type='number' min='10' max='72' placeholder='自动' style='width:56px' onchange='saveTextStyle()'>px 颜色 <input id='labelColor' type='color' value='#ffffff' onchange='saveTextStyle()' style='width:40px;padding:2px;vertical-align:middle'> <span style="color:#666">(改完点「应用新布局」重启生效)</span></div></select> <span style="font-size:12px;color:#888;margin-left:8px">当前生效: <b id="curLayout">-</b></span>
+  <label style="margin-left:12px"><input type="checkbox" id="giftSw" onchange="toggleGiftLabels(this.checked)" style="width:auto;vertical-align:middle"> 礼物总额</label><br><label style="font-size:12px;color:#888">礼物数据源地址 <input id="giftApiUrl" style="width:380px;background:#0f172a;color:#eee;border:1px solid #334155;border-radius:6px;padding:6px" placeholder="例:http://192.168.1.24:18023/api/public/rooms，留空=禁用"> <button onclick="saveGiftApiUrl()" style="padding:6px 12px">保存</button></label> <span style="font-size:12px;color:#666">(沙箱每60秒从此地址拉总额，?room=房间号自动拼接)</span><span style="color:#666;font-size:12px"> (每路一角显示今日礼物总额,60秒刷新)</span> 位置 <select id='labelPos' onchange='saveTextStyle()' style='background:#0f172a;color:#eee;border:1px solid #334155;border-radius:6px;padding:6px'><option value='bl'>左下</option><option value='br'>右下</option><option value='tl'>左上</option><option value='tr'>右上</option><option value='tc'>顶部居中</option><option value='bc'>底部居中</option></select> 字号 <input id='labelSize' type='number' min='10' max='72' placeholder='自动' style='width:56px' onchange='saveTextStyle()'>px 颜色 <input id='labelColor' type='color' value='#ffffff' onchange='saveTextStyle()' style='width:40px;padding:2px;vertical-align:middle'> 框架底色 <input id='frameColor' type='color' value='#0a1024' onchange='saveTextStyle()' style='width:40px;padding:2px;vertical-align:middle'> 描边 <input id='frameEdgeColor' type='color' value='#34477a' onchange='saveTextStyle()' style='width:40px;padding:2px;vertical-align:middle'> <span style="color:#666">(改完点「应用新布局」重启生效)</span></div></select> <span style="font-size:12px;color:#888;margin-left:8px">当前生效: <b id="curLayout">-</b></span>
 <div style="display:flex;gap:16px;margin-top:12px">
 <div style="flex:1">
 <div style="font-size:12px;color:#888;margin-bottom:4px">新布局预览(待应用)</div>
@@ -597,12 +592,14 @@ async function loadHealth(){
   let _tt={text:''}, _pp={};
   try{const t=await api('/api/title');var _gti=document.getElementById('globalTitle');if(!_isTypingIn('globalTitle')){_gti.value=t.text||'';fitTitle(_gti);}document.getElementById('titleScroll').checked=!!t.scroll;if(!_isTypingIn('titleSpeed')) document.getElementById('titleSpeed').value=t.speed||120;_tt=t;}catch(e){}
   try{const p=await api('/api/textpos');
-    if(!_isTypingIn('labelPos')) document.getElementById('labelPos').value=p.labelPos||'bl';
-    if(!_isTypingIn('titlePos')) document.getElementById('titlePos').value=p.titlePos||'tc';
-    if(!_isTypingIn('labelSize')) document.getElementById('labelSize').value=p.labelSize||'';
-    if(!_isTypingIn('titleSize')) document.getElementById('titleSize').value=p.titleSize||'';
-    if(!_isTypingIn('labelColor')) document.getElementById('labelColor').value=p.labelColor||'#ffffff';
-    if(!_isTypingIn('titleColor')) document.getElementById('titleColor').value=p.titleColor||'#ffffff';
+    // 2026-10-24 修:页面里早已没有 titlePos/titleSize/titleColor 元素(标题改走图层编辑器),
+    // 直接 getElementById(...).value 会抛错打断整个回填块,导致字号/颜色/框架色刷新后全恢复默认。
+    // 改成空安全回填:元素不存在就跳过,不影响后面的字段。
+    const _set=(id,v)=>{ const el=document.getElementById(id); if(el&&!_isTypingIn(id)) el.value=v; };
+    _set('labelPos',p.labelPos||'bl'); _set('titlePos',p.titlePos||'tc');
+    _set('labelSize',p.labelSize||''); _set('titleSize',p.titleSize||'');
+    _set('labelColor',p.labelColor||'#ffffff'); _set('titleColor',p.titleColor||'#ffffff');
+    _set('frameColor',p.frameColor||'#0a1024'); _set('frameEdgeColor',p.frameEdgeColor||'#34477a');
     _pp=p;
   }catch(e){}
   window._title={text:_tt.text||'',pos:_pp.titlePos||'tc',x:_pp.titleX,y:_pp.titleY};
@@ -868,7 +865,9 @@ async function saveTextStyle(){
   await api('/api/textpos','POST',{
     labelPos:document.getElementById('labelPos').value,
     labelSize:document.getElementById('labelSize').value,
-    labelColor:document.getElementById('labelColor').value
+    labelColor:document.getElementById('labelColor').value,
+    frameColor:document.getElementById('frameColor').value,
+    frameEdgeColor:document.getElementById('frameEdgeColor').value
   });
 }
 async function syncNow(){ await api('/api/sync','POST'); load(); }
@@ -1312,7 +1311,8 @@ const server = http.createServer(async (req, res) => {
       labelPos: cfg.LABEL_POS || 'bl', titlePos: cfg.TITLE_POS || 'tc',
       titleX: cfg.TITLE_X || '0.5', titleY: cfg.TITLE_Y || '0.03',
       labelSize: cfg.LABEL_SIZE || '', titleSize: cfg.TITLE_SIZE || '',
-      labelColor: cfg.LABEL_COLOR || '#ffffff', titleColor: cfg.TITLE_COLOR || '#ffffff'
+      labelColor: cfg.LABEL_COLOR || '#ffffff', titleColor: cfg.TITLE_COLOR || '#ffffff',
+      frameColor: cfg.FRAME_COLOR || '#0a1024', frameEdgeColor: cfg.FRAME_EDGE_COLOR || '#34477a'
     });
   }
   if (url.pathname === '/api/textpos' && req.method === 'POST') {
@@ -1342,6 +1342,8 @@ const server = http.createServer(async (req, res) => {
     setNum('TITLE_SIZE', b.titleSize, 12, 96);
     setCol('LABEL_COLOR', b.labelColor);
     setCol('TITLE_COLOR', b.titleColor);
+    setCol('FRAME_COLOR', b.frameColor);
+    setCol('FRAME_EDGE_COLOR', b.frameEdgeColor);
     saveCfg(cfg);
     return send(200, { ok: true });
   }

@@ -242,24 +242,75 @@ dt_filter() {
   printf ',drawtext=fontfile=%s:textfile=/tmp/labels/label_%s.txt:fontsize=%s:fontcolor=%s:box=1:boxcolor=0x000000B0:boxborderw=%s:x=%s:y=%s' "$FONT" "$1" "$fs" "$LABEL_FC" "$bw" "$_x" "$_y"
 }
 
+# ---- 整体框架(2026-10-24 美化一期):藏青底 + 格子间 6px 间隙 + 每格圆角描边 ----
+# 原理:每格内容先缩进 FRAME_GAP/2 再以藏青 pad 回原格尺寸(间隙=相邻两格各让一半),
+# 圆角用四角阶梯 drawbox 盖藏青近似,描边画在内容边界;全部在单格滤镜内完成,
+# 布局坐标/xstack 位置零改动。FRAME=0 (config.env)可整体关闭回退旧裸拼。
+FRAME="${FRAME:-1}"
+# 框架颜色可自选(管理页 /api/textpos 存 config.env):FRAME_COLOR=底色/间隙,FRAME_EDGE_COLOR=描边
+FRAME_COLOR="${FRAME_COLOR:-#0A1024}"
+FRAME_EDGE_COLOR="${FRAME_EDGE_COLOR:-#34477A}"
+FRAME_COLOR=$(norm_color "$FRAME_COLOR")
+FRAME_EDGE=$(norm_color "$FRAME_EDGE_COLOR")
+if [ "$FRAME" = "1" ]; then FRAME_GAP=$(( W * 6 / 1280 )); else FRAME_GAP=0; fi
+[ "$FRAME_GAP" -lt 0 ] && FRAME_GAP=0
+FRAME_HALF=$(( FRAME_GAP / 2 ))
+FRAME_RAD=$(( W * 9 / 1280 )); [ "$FRAME_RAD" -lt 6 ] && FRAME_RAD=6
+# 单格滤镜:$1=输入序 $2=格宽 $3=格高 $4=标签字号用格高 $5=输出标号 $6=1 时加 setsar=1(pip 路)
+cell_vf() {
+  local _i=$1 _w=$2 _h=$3 _lh=$4 _out=$5 _ss=${6:-0}
+  local _set=""
+  [ "$_ss" = "1" ] && _set=",setsar=1"
+  if [ "$FRAME" != "1" ] || [ "${CELL_FRAME:-0}" != "1" ] || [ "$FRAME_GAP" -le 0 ]; then
+    printf '[%s:v]scale=%s:%s:force_original_aspect_ratio=decrease%s,pad=%s:%s:(ow-iw)/2:(oh-ih)/2%s[%s]' \
+      "$_i" "$_w" "$_h" "$_set" "$_w" "$_h" "$(dt_filter "$_i" "$_lh")" "$_out"
+    return 0
+  fi
+  local _iw=$(( _w - FRAME_GAP )) _ih=$(( _h - FRAME_GAP ))
+  [ "$_iw" -lt 16 ] && _iw=16; [ "$_ih" -lt 16 ] && _ih=16
+  local _x0=$FRAME_HALF _y0=$FRAME_HALF
+  # drawbox 在 rgba 帧上不写 alpha 会默认 0(描边/圆角在 PNG 里透明不可见),必须显式 FF
+  local _ec="${FRAME_EDGE}FF" _fc="${FRAME_COLOR}FF"
+  local _fx=",drawbox=x=${_x0}:y=${_y0}:w=${_iw}:h=${_ih}:color=${_ec}:t=2"
+  # 四角阶梯:按半径分 4 段横条,宽随离角距离递减;四角镜像
+  local _r=$FRAME_RAD
+  local _h1=$(( (_r + 8) / 9 )) _h2=$(( 3 * _r / 9 )) _h3=$(( 3 * _r / 9 ))
+  local _h4=$(( _r - _h1 - _h2 - _h3 )); [ "$_h4" -lt 1 ] && _h4=1
+  local -a _hs=( "$_h1" "$_h2" "$_h3" "$_h4" )
+  local -a _ws=( "$_r" $(( _r * 55 / 100 )) $(( _r * 22 / 100 )) 1 )
+  local _off=0 _k _bw _bh _cx _cy
+  for _k in 0 1 2 3; do
+    _bh=${_hs[$_k]}; _bw=${_ws[$_k]}
+    # 左上 / 右上 / 左下 / 右下
+    _fx="${_fx},drawbox=x=${_x0}:y=$(( _y0 + _off )):w=${_bw}:h=${_bh}:color=${_fc}:t=fill"
+    _fx="${_fx},drawbox=x=$(( _x0 + _iw - _bw )):y=$(( _y0 + _off )):w=${_bw}:h=${_bh}:color=${_fc}:t=fill"
+    _fx="${_fx},drawbox=x=${_x0}:y=$(( _y0 + _ih - _off - _bh )):w=${_bw}:h=${_bh}:color=${_fc}:t=fill"
+    _fx="${_fx},drawbox=x=$(( _x0 + _iw - _bw )):y=$(( _y0 + _ih - _off - _bh )):w=${_bw}:h=${_bh}:color=${_fc}:t=fill"
+    _off=$(( _off + _bh ))
+  done
+  printf '[%s:v]scale=%s:%s:force_original_aspect_ratio=decrease%s,pad=%s:%s:(ow-iw)/2:(oh-ih)/2,pad=%s:%s:%s:%s:color=%s%s%s[%s]' \
+    "$_i" "$_iw" "$_ih" "$_set" "$_iw" "$_ih" "$_w" "$_h" "$_x0" "$_y0" "$FRAME_COLOR" \
+    "$(dt_filter "$_i" "$_lh")" "$_fx" "$_out"
+}
+
 build_filter() {
   local mode=$1 n=$2
   local vf=""
   # 2026-10-19:田字格只定义到 4 路,n>4 回退 auto 密集表
   if [ "$mode" = "grid" ] && [ "$n" -gt 4 ]; then mode=auto; fi
   if [ "$mode" = "single" ] || [ "$n" -eq 1 ]; then
-    vf="[0:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2$(dt_filter 0 $H)[v]"
+    vf="$(cell_vf 0 $W $H $H v)"
   elif [ "$mode" = "focus" ]; then
     # 2026-10-19:格子必须无缝铺满整幅画布,否则 xstack 未覆盖区域显示绿块(ffmpeg 5.1 无 fillcolor)
     # 左列主画面占 3/4 宽 x 全高;右列小窗纵向无缝铺满(各自 pad 黑边,无间隙无边距)
     local main_w=$((W*3/4))
     local col_w=$((W-main_w))
-    vf="[0:v]scale=${main_w}:${H}:force_original_aspect_ratio=decrease,pad=${main_w}:${H}:(ow-iw)/2:(oh-ih)/2$(dt_filter 0 $H)[v0]"
+    vf="$(cell_vf 0 $main_w $H $H v0)"
     local nsmall=$((n-1)) layout="" y=0
     for ((i=1;i<n;i++)); do
       local ch=$((H/nsmall))
       if [ "$i" -eq "$((n-1))" ]; then ch=$((H-y)); fi  # 最后一个吃掉余数
-      vf="$vf;[$i:v]scale=${col_w}:${ch}:force_original_aspect_ratio=decrease,pad=${col_w}:${ch}:(ow-iw)/2:(oh-ih)/2$(dt_filter $i $ch)[v$i]"
+      vf="$vf;$(cell_vf $i $col_w $ch $ch v$i)"
       layout="$layout|${main_w}_${y}"; y=$((y+ch))
     done
     vf="$vf;[v0]"
@@ -281,7 +332,7 @@ build_filter() {
       fi
       hh=$ch; y=$((row*ch))
       if [ "$row" -eq "$((rows-1))" ]; then hh=$((H-row*ch)); fi
-      vf="$vf;[$i:v]scale=$ww:$hh:force_original_aspect_ratio=decrease,pad=$ww:$hh:(ow-iw)/2:(oh-ih)/2$(dt_filter $i $hh)[v$i]"
+      vf="$vf;$(cell_vf $i $ww $hh $hh v$i)"
       pos="$pos|${x}_${y}"
     done
     vf="${vf:1};"
@@ -303,7 +354,7 @@ build_filter() {
         hh=$ch; y=$((row*ch))
         if [ "$row" -eq 1 ]; then hh=$((H-ch)); fi
       fi
-      vf="$vf;[$i:v]scale=$ww:$hh:force_original_aspect_ratio=decrease,pad=$ww:$hh:(ow-iw)/2:(oh-ih)/2$(dt_filter $i $hh)[v$i]"
+      vf="$vf;$(cell_vf $i $ww $hh $hh v$i)"
       pos="$pos|${x}_${y}"
     done
     vf="${vf:1};"
@@ -325,7 +376,7 @@ build_filter() {
         if [ "$col" -eq "$((cols-1))" ]; then ww=$((W-col*cw)); fi
         if [ "$row" -eq "$((rows-1))" ]; then hh=$((H-row*ch)); fi
       fi
-      vf="$vf;[$i:v]scale=$ww:$hh:force_original_aspect_ratio=decrease,pad=$ww:$hh:(ow-iw)/2:(oh-ih)/2$(dt_filter $i $hh)[v$i]"
+      vf="$vf;$(cell_vf $i $ww $hh $hh v$i)"
       pos="$pos|${x}_${y}"
     done
     vf="${vf:1};"
@@ -335,7 +386,7 @@ build_filter() {
     # 2026-10-20:画中画——第 0 路全屏为底，其余占右 1/4 宽×全高、纵向平分
     # 注意：xstack 不支持重叠输入（后输入盖不上），必须用 overlay 链
     # 各路 SAR 必须一致(setsar=1)，否则 scale 的 force_original_aspect_ratio 会产生分数 SAR 触发重配失败
-    vf="[0:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,setsar=1,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2$(dt_filter 0 $H)[base]"
+    vf="$(cell_vf 0 $W $H $H base 1)"
     local m=$((n-1))
     local sx=$((W-W/4)) sw=$((W/4))
     local prev="base"
@@ -344,7 +395,7 @@ build_filter() {
       local ch=$((H/m))
       local y=$((j*ch))
       if [ "$i" -eq "$((n-1))" ]; then ch=$((H-y)); fi  # 最后一个吃掉余数
-      vf="$vf;[$i:v]scale=${sw}:${ch}:force_original_aspect_ratio=decrease,setsar=1,pad=${sw}:${ch}:(ow-iw)/2:(oh-ih)/2$(dt_filter $i $ch)[p$i]"
+      vf="$vf;$(cell_vf $i $sw $ch $ch p$i 1)"
       if [ "$i" -eq "$((n-1))" ]; then
         vf="$vf;[$prev][p$i]overlay=${sx}:${y}[v]"
       else
@@ -376,11 +427,11 @@ build_filter() {
     esac
     local vf="" pos="" i
     for ((i=0;i<n;i++)); do
-      vf="$vf;[$i:v]scale=${aw[$i]}:${ah[$i]}:force_original_aspect_ratio=decrease,pad=${aw[$i]}:${ah[$i]}:(ow-iw)/2:(oh-ih)/2$(dt_filter $i ${ah[$i]})[v$i]"
+      vf="$vf;$(cell_vf $i ${aw[$i]} ${ah[$i]} ${ah[$i]} v$i)"
       pos="$pos|${ax[$i]}_${ay[$i]}"
     done
     if [ "$n" -eq 1 ]; then
-      vf="[0:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2$(dt_filter 0 $H)[v]"
+      vf="$(cell_vf 0 $W $H $H v)"
     else
       vf="${vf:1};"
       for ((i=0;i<n;i++)); do vf="$vf[v$i]"; done
@@ -393,8 +444,33 @@ build_filter() {
 
 # 主滤镜:跳过每路 drawtext(省 CPU,标签走独立覆盖层)
 SKIP_LABELS=1
+CELL_FRAME=0
 VFILTER=$(build_filter "$LAYOUT" "$N")
 SKIP_LABELS=0
+
+# ---- 整体框架改静态图(2026-10-24 卡顿根因) ----
+# 实测:drawbox 在主滤镜逐帧画框架会让 CPU 翻倍(5.7s->12.3s/30s 片段),nas3 四核跑满致 speed 0.68x。
+# 改法:开机时用同一单格滤镜渲染一张静态框架 PNG,主滤镜只做一次 overlay 混合;
+# 框架仍在视频层之上、图片图层/标题/标签之下(顺序:网格->框架图->图片->标题->标签层)。
+FRAME_ON=0
+if [ "$FRAME" = "1" ]; then
+  rm -f /tmp/frame.png
+  CELL_FRAME=1; SKIP_LABELS=1
+  _FVF=$(build_filter "$LAYOUT" "$N")
+  CELL_FRAME=0; SKIP_LABELS=0
+  FRAME_FILTER=$(printf '%s' "$_FVF" | sed -E 's|\[[0-9]+:v\]scale=([0-9]+):([0-9]+):force_original_aspect_ratio=decrease,(setsar=1,)?pad=[0-9]+:[0-9]+:\(ow-iw\)/2:\(oh-ih\)/2|color=c=black@0:s=\1x\2:r=1:d=3600,format=rgba|g')
+  # drawbox 只写 RGB 不动 alpha 平面(透明底上描边/圆角会隐形),用 geq 按亮度重建 alpha:亮度>0 的像素=框架,置 255;黑色=内容区,置 0
+  if ffmpeg -y -v error -nostdin -filter_complex "${FRAME_FILTER%\[v]}[vbase];[vbase]format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(gt(r(X,Y)+g(X,Y)+b(X,Y),0),255,0)'[v]" -map "[v]" -frames:v 1 /tmp/frame.tmp.png 2>/dev/null && [ -s /tmp/frame.tmp.png ]; then
+    mv /tmp/frame.tmp.png /tmp/frame.png
+    FRAME_ON=1
+    _fidx=$((N + NIMG))
+    INPUTS+=( -loop 1 -framerate "$FPS" -i /tmp/frame.png )
+    VFILTER="${VFILTER%\[v]}[vbase];[vbase][${_fidx}:v]overlay=0:0:format=yuv420:shortest=1[v]"
+    echo "[grid] 框架静态图已启用(输入 ${_fidx})" >&2
+  else
+    echo "[grid] 框架图渲染失败,跳过框架(不影响推流)" >&2
+  fi
+fi
 
 # 图片 overlay:在网格之后、标题之前(标题最后盖在最上层)
 # 图层列表越靠上越靠前,FFmpeg 从下往上叠,故倒序叠加让第 0 层在最上
@@ -503,7 +579,10 @@ if [ "$LABELS_ON" = "1" ]; then
   mkfifo /tmp/label_fifo
   # 带标签的滤镜:复用布局,把视频 cell 换成透明底(sed 变换,定位逻辑零重复)
   _LVF=$(build_filter "$LAYOUT" "$N")
-  OVERLAY_FILTER=$(printf '%s' "$_LVF" | sed -E 's|\[[0-9]+:v\]scale=([0-9]+):([0-9]+):force_original_aspect_ratio=decrease,(setsar=1,)?pad=[0-9]+:[0-9]+:\(ow-iw\)/2:\(oh-ih\)/2|color=c=black@0:s=\1x\2:r=1:d=3600,format=rgba|g')
+  # 2026-10-24 用户定:框架层放最底——标签覆盖层只画标签,不重画框架:
+  # 剥掉单格的 drawbox(描边/圆角),外圈 pad 的藏青改透明,框架只留在主滤镜的视频层上,
+  # 这样图片图层/标题压在框架之上不会被覆盖层顶部的框架条盖掉边角。
+  OVERLAY_FILTER=$(printf '%s' "$_LVF" | sed -E -e 's|\[[0-9]+:v\]scale=([0-9]+):([0-9]+):force_original_aspect_ratio=decrease,(setsar=1,)?pad=[0-9]+:[0-9]+:\(ow-iw\)/2:\(oh-ih\)/2|color=c=black@0:s=\1x\2:r=1:d=3600,format=rgba|g' -e 's|,drawbox=[^,\[]*||g' -e 's|(pad=[0-9]+:[0-9]+:[0-9]+:[0-9]+:color=)0x[0-9A-Fa-f]+|\1black@0|g')
   # 渲染器:每 60s 更新 label 文件并渲染 60 帧(1fps)到 /tmp/labels.raw(原子替换)
   # 用 ( ) 子 shell 以便继承函数/数组;输出 60 帧后 sleep,下轮自动用新总额
   ( while true; do
@@ -520,7 +599,7 @@ if [ "$LABELS_ON" = "1" ]; then
   ( while true; do cat /tmp/labels.raw 2>/dev/null; sleep 0.2; done > /tmp/label_fifo ) &
   echo $! > /tmp/label_feeder.pid
   # 主 ffmpeg:加 rawvideo 输入 + overlay(盖在最上层)
-  _ov_idx=$((N + NIMG))
+  _ov_idx=$((N + NIMG + FRAME_ON))
   INPUTS+=( -f rawvideo -pix_fmt rgba -s ${W}x${H} -framerate 1 -i /tmp/label_fifo )
   VFILTER="${VFILTER%\[v\]}[vbase];[vbase][${_ov_idx}:v]overlay=0:0:format=yuv420:eof_action=repeat[v]"
   echo "[grid] 标签覆盖层已启用(输入 ${_ov_idx},60s 刷新)" >&2
