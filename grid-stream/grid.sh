@@ -1,7 +1,7 @@
 #!/bin/bash
 # 多路斗鱼同屏推流:代理 -> ffmpeg 网格 -> RTMP
 # 配置从 /app/config.env 读取(管理页修改)
-CONFIG="${GRID_CONFIG:-/app/config.env}"
+CONFIG="/app/config.env"
 if [ -f "$CONFIG" ]; then source "$CONFIG"; fi
 
 PROXY="${PROXY:-http://stream-proxy:8888}"
@@ -84,6 +84,17 @@ for ((i=0;i<9;i++)); do
   _sv="SLOT_$i"
   _rid="${!_sv:-}"
   [ -z "$_rid" ] && continue
+  # 2026-10-28 custom RTMP input (AI person): slot value starting with rtmp:// bypasses Douyu proxy, direct pull, label fixed to AI
+  if [[ "$_rid" == rtmp://* ]]; then
+    SLOT_RIDS+=("$_rid")
+    # NOTE: -reconnect is HTTP-only; ffmpeg rejects it for RTMP inputs ("Option reconnect not found") and the whole grid dies
+    INPUTS+=( -rw_timeout 15000000 -i "$_rid" )
+    NAMES+=("AI人")
+    _v="${VOLARR0[$i]:-1.0}"
+    if ! [[ "$_v" =~ ^[0-9]*\.?[0-9]+$ ]]; then _v="1.0"; fi
+    FVOLS+=("$_v")
+    continue
+  fi
   SLOT_RIDS+=("$_rid")
   INPUTS+=( -rw_timeout 15000000 -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 10 -i "$PROXY/live/slot$i" )
   INFO=$(curl -m 5 -s "$MULTIVIEW_API/api/room?rid=$_rid" 2>/dev/null)
@@ -183,8 +194,13 @@ write_label_files() {
       [ -z "$lb" ] && lb="${NAMES[$i]}"
       [ -z "$lb" ] && lb="$rid"
     fi
-    _gtv="GIFT_TOTAL_$rid"
-    _gt="${!_gtv:-}"
+    # 2026-11-02: RTMP/non-numeric rid cannot be used as a variable name for indirect expansion,
+    # it errors "invalid variable name"; such slots have no Douyu gift total, skip gift lookup
+    _gt=""
+    if [[ "$rid" =~ ^[0-9]+$ ]]; then
+      _gtv="GIFT_TOTAL_$rid"
+      _gt="${!_gtv:-}"
+    fi
     if [ "$_gen" = "1" ] && [ -n "$_gt" ]; then
       _gt="今日 ¥$_gt"
       if [ -n "$lb" ]; then lb="$lb"$'\n'"$_gt"; else lb="$_gt"; fi
@@ -607,6 +623,7 @@ fi
 
 exec ffmpeg -y "${INPUTS[@]}" \
   -filter_complex "$VFILTER;$AFILTER" \
+  -filter_complex_threads 4 \
   -map "[v]" -map "[a]" -c:v libx264 -preset veryfast -tune zerolatency \
   -b:v $BITRATE -maxrate ${BR_NUM}k -bufsize $((BR_NUM*2))k \
   -pix_fmt yuv420p -r $FPS -g $((FPS*2)) \

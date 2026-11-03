@@ -10,7 +10,7 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
 const VENDOR = path.join(ROOT, 'node_modules', 'mpegts.js', 'dist');
 const PORT = Number(process.env.PORT) || 8787;
-const ROOMS_FILE = process.env.ROOMS_FILE || path.join(ROOT, 'rooms.json');
+const ROOMS_FILE = path.join(ROOT, 'rooms.json');
 async function getRoomsFile(){ try{ return JSON.parse(await fs.readFile(ROOMS_FILE,'utf-8')); }catch(e){ return []; } }
 async function saveRoomsFile(r){
   // 注意:rooms.json 通常是 bind 挂载的单文件,rename 到挂载点会 EBUSY(2026-10-19 实测),

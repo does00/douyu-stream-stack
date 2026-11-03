@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 const http = require('http');
+const https = require('https');
 const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -201,6 +202,53 @@ async function getFfmpegError() {
   }catch(e){ return ''; }
 }
 
+// 2026-11-01: 真实推流探针（fu 拍板“修管理页假状态 + 加看门报警”）
+// 背景：旧 /api/status 只看容器存活；2026-11-01 05:03 推流地址失效后，ffmpeg 在
+// 容器里每 300s 空转重试 2.5 小时，页面仍显示“推流中”、无人报警。
+// 探针口径与 grid 容器内 entry 看门狗一致：看 ffmpeg.log 的 time= 是否真在推进。
+function _parseHMS(s){ const p=String(s||'').split(':'); if(p.length!==3) return null; const v=(+p[0])*3600+(+p[1])*60+(+p[2]); return isNaN(v)?null:v; }
+function parseFfmpegTail(txt){
+  const out={ timeSec:null, bitrate:'', speed:'' };
+  if(!txt) return out;
+  const segs=String(txt).split(/\r|\n/);
+  for(let i=segs.length-1;i>=0;i--){
+    const m=segs[i].match(/time=(\d+:\d+:\d+(?:\.\d+)?)/);
+    if(m){ out.timeSec=_parseHMS(m[1]); const b=segs[i].match(/bitrate=\s*([0-9.]+kbits\/s)/); if(b) out.bitrate=b[1]; const sp=segs[i].match(/speed=\s*([0-9.]+x)/); if(sp) out.speed=sp[1]; break; }
+  }
+  return out;
+}
+async function probeStream(){
+  const r={ containerRunning:false, started:'', ffmpegAlive:false, timeSec:null, bitrate:'', speed:'', logAgeSec:null, shortExits10m:0 };
+  const gs=await containerStatus(GRID_CONTAINER);
+  r.containerRunning=!!gs.running; r.started=gs.started||'';
+  if(!r.containerRunning) return r;
+  try{
+    const a=await sh('docker exec ' + GRID_CONTAINER + ' sh -c "pgrep -x ffmpeg >/dev/null && echo ALIVE; stat -c %Y /app/logs/ffmpeg.log 2>/dev/null; tail -c 30000 /app/logs/ffmpeg.log 2>/dev/null"', 6000);
+    const out=String(a.stdout||'');
+    r.ffmpegAlive=/ALIVE/.test(out);
+    const mm=out.match(/(?:^|\n)(\d{9,})(?:\n|$)/); if(mm) r.logAgeSec=Math.max(0, Math.floor(Date.now()/1000)-parseInt(mm[1],10));
+    const p=parseFfmpegTail(out); r.timeSec=p.timeSec; r.bitrate=p.bitrate; r.speed=p.speed;
+  }catch(e){}
+  try{
+    const lg=await sh('docker logs --since 12m ' + GRID_CONTAINER + ' 2>&1 | grep -a "推流进程退出"', 6000);
+    let cnt=0;
+    for(const ln of String(lg.stdout||'').split('\n')){ const m=ln.match(/运行 (\d+)s/); if(m && parseInt(m[1],10)<60) cnt++; }
+    r.shortExits10m=cnt;
+  }catch(e){}
+  return r;
+}
+function streamVerdict(p){
+  if(!p.containerRunning) return { state:'stopped', reason:'容器未运行' };
+  // 已稳定产出（本轮 ffmpeg 已输出 ≥30s 且日志新鲜）优先判 on：
+  // 恢复后旧的短退记录还在 12 分钟窗口里，不能把已恢复误判成 down。
+  if(p.ffmpegAlive && p.timeSec!=null && p.timeSec>=30 && p.logAgeSec!=null && p.logAgeSec<=20) return { state:'on', reason:'' };
+  if(p.shortExits10m>=3) return { state:'down', reason:'ffmpeg 反复短时退出（近12分钟 ' + p.shortExits10m + ' 次），推流地址可能已失效或直播间已关播' };
+  if(p.ffmpegAlive && p.timeSec!=null && p.logAgeSec!=null && p.logAgeSec<=20) return { state:'starting', reason:'新一轮 ffmpeg 刚启动，观察中' };
+  if(p.logAgeSec!=null && p.logAgeSec>120) return { state:'down', reason:'ffmpeg 输出停滞 ' + p.logAgeSec + ' 秒' };
+  if(!p.ffmpegAlive) return { state:'down', reason:'ffmpeg 进程不在（entry 退避重试中）' };
+  return { state:'down', reason:'无有效推流输出' };
+}
+
 function getJson(url) {
   return new Promise((resolve) => {
     const req = http.get(url, (res) => {
@@ -302,7 +350,7 @@ input{background:#0f172a;color:#eee;border:1px solid #334155;border-radius:6px;p
 <option value="720p">720p</option><option value="1080p">1080p</option>
 </select></span>
 <span>帧率 <select id="qFps" style="background:#0f172a;color:#eee;border:1px solid #334155;border-radius:6px;padding:6px">
-<option value="25">25fps</option><option value="30">30fps</option><option value="60">60fps</option>
+<option value="20">20fps</option><option value="25">25fps</option><option value="30">30fps</option><option value="60">60fps</option>
 </select></span>
 <button onclick="saveQuality()" style="background:#0ea5e9;color:#fff;border:0;border-radius:6px;padding:6px 12px;cursor:pointer">保存画质</button>
 </div>
@@ -536,9 +584,10 @@ async function load(){
   try{ s=await api('/api/status'); }catch(e){ s=null; document.getElementById('st').textContent='状态获取失败'; }
   try{ rooms=await api('/api/rooms'); }catch(e){ rooms=[]; }
   try{ slotData=await api('/api/slots'); }catch(e){ slotData=null; }
-  if(s){ document.getElementById('st').innerHTML=s.pushing?'<span class="on">推流中</span>':'<span class="off">已停止</span>';
-    var _e=document.getElementById('stErr'); if(_e){ _e.textContent=s.lastError||''; _e.style.display=s.lastError?'':'none'; }
-  var _m=s.pushing?("已推 "+s.uptime):""; if(s&&s.pushing&&s.bitrate){_m+=" | "+s.bitrate; if(s.speed)_m+=" "+s.speed;} document.getElementById("stMeta").textContent=_m; if(s&&s.pushing){ loadHealth(); } }
+  if(s){ var _state=s.state||(s.pushing?'on':'stopped');
+    document.getElementById('st').innerHTML= _state==='on'?'<span class="on">推流中</span>' : _state==='down'?'<span class="off">推流异常</span>' : _state==='starting'?'<span style="color:#f59e0b">启动中</span>' : '<span class="off">已停止</span>';
+    var _e=document.getElementById('stErr'); if(_e){ var _et=s.warn||s.lastError||''; _e.textContent=_et; _e.style.display=_et?'':'none'; }
+  var _m=''; if(_state==='on'){ _m='已推 '+(s.streamUptime||s.uptime||''); if(s.bitrate){_m+=' | '+s.bitrate; if(s.speed)_m+=' '+s.speed;} } else if(_state==='down'){ _m='容器已运行 '+(s.uptime||'')+'，但无有效输出'; } else if(_state==='starting'){ _m='ffmpeg 正在启动…'; } document.getElementById("stMeta").textContent=_m; if(_state==='on'){ loadHealth(); } }
 async function loadHealth(){
   try{
     var h=await api('/api/health');
@@ -1266,6 +1315,7 @@ const server = http.createServer(async (req, res) => {
     const rate = String(b.rate||'').trim();
     if(!/^[0-3]$/.test(rate)) return send(400, { error: 'bad rate' });
     require('fs').writeFileSync('/volume2/docker/stream-proxy/pull_rate.conf', rate+'\n');
+    sh('curl -s --unix-socket /var/run/docker.sock -X POST http://localhost/containers/stream-proxy/restart').then(r => { if (r.err) console.error('[pullrate] 代理重启失败:', r.err.message); });
     return send(200, { ok: true, rate });
   }
   if (url.pathname === '/api/title/apply' && req.method === 'POST') {
@@ -1373,34 +1423,27 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/status') {
-    const gs = await containerStatus(GRID_CONTAINER);
-    let pushing = false, uptime = '';
-    if (gs.running) {
-      pushing = true;
-      if (gs.started) {
-        const mins = Math.floor((Date.now() - new Date(gs.started).getTime()) / 60000);
-        uptime = mins < 60 ? mins + ' 分钟' : Math.floor(mins/60) + ' 小时 ' + (mins%60) + ' 分钟';
-      }
+    // 2026-11-01: 改真实状态——pushing 只在 ffmpeg 真在产出时为 true（探针口径见 probeStream）。
+    // 旧版只看容器存活，地址失效空转时页面假报“推流中”；bitrate/speed 也改从 ffmpeg.log 取
+    // （旧版 grep docker logs 永远取不到，进度行写的是文件不是容器日志）。
+    const p = await probeStream();
+    const v = streamVerdict(p);
+    let uptime = '';
+    if (p.started) {
+      const mins = Math.floor((Date.now() - new Date(p.started).getTime()) / 60000);
+      uptime = mins < 60 ? mins + ' 分钟' : Math.floor(mins/60) + ' 小时 ' + (mins%60) + ' 分钟';
     }
-    let bitrate='', speed='';
-    if(pushing){
-      try{
-        const lg = await sh('docker logs --tail 50 ' + GRID_CONTAINER + ' 2>&1 | tr "\\r" "\\n" | grep -a -o "bitrate=.*speed=[0-9.]*x" | tail -1', 5000);
-        const line = String((lg&&lg.stdout)||'');
-        const bm = line.match(/bitrate=\s*([0-9.]+kbits\/s)/);
-        const sm = line.match(/speed=\s*([0-9.]+x)/);
-        if(bm) bitrate=bm[1]; if(sm) speed=sm[1];
-      }catch(e){}
+    let streamUptime = '';
+    if (p.timeSec != null && p.timeSec > 0) {
+      const s = Math.floor(p.timeSec);
+      streamUptime = Math.floor(s/3600) + ':' + String(Math.floor(s%3600/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
     }
-    let lastError='';
-    if(!pushing){
-      lastError = await getFfmpegError();
-    }else{
-      // 推流中也查一下是否有报错（比如 key 刚过期还在重试）
-      const e = await getFfmpegError();
-      if(e) lastError = e;
-    }
-    return send(200, { pushing, uptime, rtmpUrl: getRtmpUrl(), layout: getLayout(), bitrate, speed, lastError });
+    const pushing = v.state === 'on';
+    let warn = '';
+    if (v.state === 'down') warn = '推流异常：' + v.reason + '。请在斗鱼重新开播、更新推流地址后，点“应用并重启”。';
+    let lastError = '';
+    if (!pushing) lastError = await getFfmpegError();
+    return send(200, { pushing, state: v.state, warn, streamUptime, uptime, rtmpUrl: getRtmpUrl(), layout: getLayout(), bitrate: p.bitrate || '', speed: p.speed || '', lastError, watchdog: { state: _wd.state, badStreak: _wd.badStreak } });
   }
 
   if (url.pathname === '/api/rooms') {
@@ -1534,5 +1577,62 @@ const server = http.createServer(async (req, res) => {
 
   send(404, { error: 'not found' });
 });
+
+// 2026-11-01: 推流看门狗（fu 拍板，每分钟判一次，Bark 报警，恢复补报）
+// 判据：容器在跑但推不出去才报——反复短退 ≥3 次（死地址模式，实锤）、
+// 或无产出持续约 2–3 个 tick；单次短退/正常重启不报。人为停止容器不报警。
+// 状态只存内存：manager 重启后靠日志里的短退记录重新判定，不漏报。
+const _wd = { state:'ok', badStreak:0, goodStreak:0, downSince:0, bootedAt:Date.now(), noKeyWarned:false, lastVerdict:'', lastReason:'' };
+function barkKey(){ try{ return String(process.env.BARK_KEY || getCfg().BARK_KEY || '').trim(); }catch(e){ return ''; } }
+function sendBark(title, body){
+  const key = barkKey();
+  if(!key){ if(!_wd.noKeyWarned){ _wd.noKeyWarned=true; console.log('[watchdog] 未配置 BARK_KEY（config.env），报警未发送：' + title); } return Promise.resolve(false); }
+  const u = 'https://api.day.app/' + key + '/' + encodeURIComponent(title) + '/' + encodeURIComponent(body) + '?group=' + encodeURIComponent('推流看门') + '&url=' + encodeURIComponent('http://192.168.1.23:8901/');
+  return new Promise((resolve)=>{
+    const req = https.get(u, { timeout: 8000 }, (res)=>{ let d=''; res.on('data', c=>d+=c); res.on('end', ()=>{ const ok = res.statusCode===200 && /"code"\s*:\s*200/.test(d); console.log('[watchdog] Bark ' + (ok?'成功':'失败(' + res.statusCode + ')') + '：' + title); resolve(ok); }); });
+    req.on('error', (e)=>{ console.log('[watchdog] Bark 网络错误：' + e.message); resolve(false); });
+    req.on('timeout', ()=>{ req.destroy(); resolve(false); });
+  });
+}
+async function watchdogTick(){
+  try{
+    const p = await probeStream();
+    const v = streamVerdict(p);
+    _wd.lastVerdict = v.state; _wd.lastReason = v.reason || '';
+    const now = Date.now();
+    if(v.state === 'stopped'){
+      // 人为停止：不报警，并清掉异常态（之后重新启动若再坏，仍会重新报警）
+      _wd.badStreak = 0; _wd.goodStreak = 0;
+      if(_wd.state === 'down'){ _wd.state = 'ok'; _wd.downSince = 0; }
+      return;
+    }
+    if(v.state === 'on'){
+      _wd.goodStreak++; _wd.badStreak = 0;
+      if(_wd.state === 'down' && _wd.goodStreak >= 2){
+        _wd.state = 'ok';
+        const mins = Math.max(1, Math.round((now - _wd.downSince) / 60000));
+        _wd.downSince = 0;
+        sendBark('斗鱼推流已恢复', '拼合推流恢复正常输出，本次异常约 ' + mins + ' 分钟。管理页 192.168.1.23:8901');
+      }
+      return;
+    }
+    // 非 on、非 stopped：down 或 starting
+    _wd.badStreak++; _wd.goodStreak = 0;
+    if(_wd.state === 'down') return;
+    if(now - _wd.bootedAt < 120000) return; // manager 自身刚启动，留出观察窗
+    let alert = false;
+    if(p.shortExits10m >= 3) alert = true;                                            // 死地址反复短退：实锤
+    else if(_wd.badStreak >= 2 && p.logAgeSec != null && p.logAgeSec >= 120) alert = true; // 输出停滞 ≥120s
+    else if(_wd.badStreak >= 3 && v.state === 'down') alert = true;                   // 其他 down 持续 3 个 tick
+    if(alert){
+      _wd.state = 'down'; _wd.downSince = now;
+      const err = await getFfmpegError();
+      sendBark('斗鱼推流异常', '拼合推流已停：' + v.reason + '。请在斗鱼重新开播并更新推流地址后，到管理页点“应用并重启”。管理页 192.168.1.23:8901' + (err ? '（最近报错：' + err + '）' : ''));
+    }
+  }catch(e){ console.log('[watchdog] tick 异常：' + (e && e.message)); }
+}
+setInterval(watchdogTick, 60000);
+setTimeout(watchdogTick, 20000);
+console.log('[watchdog] 推流看门狗已启动（60s/tick，Bark ' + (barkKey() ? '已配置' : '未配置') + '）');
 
 server.listen(PORT, () => console.log('管理页 :' + PORT));
