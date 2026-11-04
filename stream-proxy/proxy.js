@@ -14,6 +14,13 @@ const FILLER_SEC = 2;
 const FILLER_PATH = '/tmp/filler.flv';
 const SLOT_COUNT = 9;
 const SLOTS_FILE = process.env.SLOTS_FILE || '/app/slots.json';
+// 自定义源 RTMP 入口:OBS 等推流器推到 nginx-rtmp 的地址前缀,
+// 代理按格子里的自定义名拼成完整 RTMP 地址去拉流(不走斗鱼)。
+// 默认值与 grid 的 RTMP 输出目标同网段容器名一致,部署时可用环境变量覆盖。
+const RTMP_BASE = process.env.RTMP_BASE || 'rtmp://nginx-rtmp:1935/live';
+// 自定义源判定:纯数字 = 斗鱼房间号,其他 = 自定义推流名(如 youxi)。
+// 注意:管理页房间列表只认纯数字,自定义源只能走格子分配进代理,不能走房间列表。
+function isCustomRid(rid) { return !!(rid && !/^\d+$/.test(String(rid))); }
 
 // ---- slot->rid 映射:热更新,单一写入源为 POST /api/slots ----
 let slots = {};           // { slot0: "rid"|null, ... }
@@ -336,7 +343,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   const mSlot = req.url.match(/^\/live\/slot(\d+)(?:\/|$)/);
-  const mRid = req.url.match(/^\/live\/(\d+)(?:\/|$)/);
+  const mRid = req.url.match(/^\/live\/([A-Za-z0-9_-]+)(?:\/|$)/);
   if (!mSlot && !mRid) { res.writeHead(404); res.end('use /live/<rid> or /live/slotN'); return; }
   const isSlot = !!mSlot;
   const slotIdx = isSlot ? parseInt(mSlot[1]) : -1;
@@ -362,11 +369,12 @@ const server = http.createServer(async (req, res) => {
   }, 2000) : null;
   const headers = { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.douyu.com/' };
   let closed = false;
-  let curPr = null, curUpRes = null;
+  let curPr = null, curUpRes = null, curFfmpeg = null;
   function killUpstream(){
     try{ if(curUpRes) curUpRes.destroy(); }catch(e){}
     try{ if(curPr) curPr.destroy(); }catch(e){}
-    curPr = null; curUpRes = null;
+    try{ if(curFfmpeg) curFfmpeg.kill('SIGKILL'); }catch(e){}
+    curPr = null; curUpRes = null; curFfmpeg = null;
   }
   req.on('close', () => { closed = true; if (verTimer) clearInterval(verTimer); killUpstream(); });
   // 先写头再取流:房间离线也不 502,直接黑场占位,推流端连接不断
@@ -437,6 +445,48 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  // 自定义源 RTMP 中转:用容器内 ffmpeg 把 nginx-rtmp 上的推流转成 FLV,
+  // 走同一条 rebaser 时间戳重基管道给下游,接口与 fetchUpstream 一致:
+  // 有数据返回 true,无数据/推流未到返回 false,主循环照旧走黑场保活+重试。
+  // 上游未推流时 ffmpeg 会快速退出,不会卡住主循环;格子换映射/客户端断开时
+  // killUpstream 会杀掉 ffmpeg 子进程,避免野进程残留。
+  function fetchRtmpUpstream(rtmpUrl) {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (v) => { if (done) return; done = true; try { if (curFfmpeg) curFfmpeg.kill('SIGKILL'); } catch (e) {} curFfmpeg = null; resolve(v); };
+      if (closed) return finish(false);
+      let ff;
+      try {
+        ff = spawn('ffmpeg', ['-v', 'error', '-i', rtmpUrl, '-c', 'copy', '-f', 'flv', '-'], { stdio: ['ignore', 'pipe', 'pipe'] });
+      } catch (e) { return finish(false); }
+      curFfmpeg = ff;
+      rebaser.newSession();
+      let gotData = false;
+      let lastDataAt = Date.now();
+      const idleTimer = setInterval(() => {
+        if (closed || done) { clearInterval(idleTimer); return; }
+        if (Date.now() - lastDataAt > 10000) {
+          clearInterval(idleTimer);
+          try { ff.kill('SIGKILL'); } catch (e) {}
+          finish(gotData);
+        }
+      }, 2000);
+      ff.stdout.on('data', (c) => {
+        if (closed) { killUpstream(); return; }
+        gotData = true;
+        lastDataAt = Date.now();
+        let out = null;
+        try { out = rebaser.push(c); } catch (e) { out = null; }
+        if (out && out.length) { try { res.write(out); } catch (e) {} }
+      });
+      const fin = () => { clearInterval(idleTimer); finish(gotData); };
+      ff.stdout.on('end', fin);
+      ff.stdout.on('error', fin);
+      ff.on('error', fin);
+      ff.on('close', fin);
+    });
+  }
+
   // 2026-10-18 make-before-break:后台预取新上游,等到关键帧就绪后返回连接(不写 res)
   // 调用方负责在就绪后切换 rebaser 并接管连接
   function prepareUpstream(url, tmpRebaser, timeoutMs = 10000) {
@@ -499,13 +549,20 @@ const server = http.createServer(async (req, res) => {
       }
       let url = null, streamed = false;
       if (curRid) {
-        try { url = await getStreamUrl(curRid); }
-        catch (e) { console.error(`[${now()}] ${tag()} 取流地址失败: ${e.message}`); }
-        // 2026-10-18:取地址期间若映射又变了,丢弃旧地址回主循环(避免连上旧房间又被杀,白白卡几秒)
-        if (isSlot && !closed && slotVer[slotIdx] !== lastSeenVer) continue;
-        if (url && !closed) streamed = await fetchUpstream(url);
-        // 取流期间若映射变了,直接回主循环(不计失败)
-        if (isSlot && !closed && slotVer[slotIdx] !== lastSeenVer) continue;
+        if (isCustomRid(curRid)) {
+          // 自定义源:不去斗鱼,直接拉 nginx-rtmp 上的同名推流。
+          // 推流未到时 ffmpeg 快速退出,照旧走黑场保活+重试,grid 不会断。
+          if (!closed) streamed = await fetchRtmpUpstream(`${RTMP_BASE}/${curRid}`);
+          if (isSlot && !closed && slotVer[slotIdx] !== lastSeenVer) continue;
+        } else {
+          try { url = await getStreamUrl(curRid); }
+          catch (e) { console.error(`[${now()}] ${tag()} 取流地址失败: ${e.message}`); }
+          // 2026-10-18:取地址期间若映射又变了,丢弃旧地址回主循环(避免连上旧房间又被杀,白白卡几秒)
+          if (isSlot && !closed && slotVer[slotIdx] !== lastSeenVer) continue;
+          if (url && !closed) streamed = await fetchUpstream(url);
+          // 取流期间若映射变了,直接回主循环(不计失败)
+          if (isSlot && !closed && slotVer[slotIdx] !== lastSeenVer) continue;
+        }
       }
       if (closed) break;
       if (streamed) { fails = 0; continue; }
